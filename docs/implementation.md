@@ -67,6 +67,8 @@ The agent receives these native canvas tools:
 
 Keep the canvas browser open for visual inspection. Capture reports an error when a browser is unavailable; it does not substitute an invented screenshot. Object reads and ordinary workspace work can continue independently.
 
+Captures are capped at 2048 pixels along their longest edge. Close-ups exclude unrelated distant objects while retaining native parent frames for clipping. The intermediate render is also bounded; a single oversized intersecting element or frame can still reduce close-up detail.
+
 The service owns committed board state. Human and agent mutations check affected-object revisions, and a conflicting batch leaves the scene unchanged. Native editor fields remain available for later editing. Undo of an agent mutation also checks for subsequent changes before restoring affected objects.
 
 ## Persistence and artifacts
@@ -94,7 +96,7 @@ npx playwright install chromium
 npm run test:e2e
 ```
 
-Build runs TypeScript checking and creates the browser bundle. The 49 automated tests exercise persistence, revision conflicts, retry recovery, artifact bytes, application orchestration, and the runtime adapter using test subprocesses. The browser test uses the actual Excalidraw editor and capture path with a test-only provider: it draws and moves saved shapes, receives annotations, sends live notices, reloads, and safely undoes agent edits while preserving human work. It also holds a pointer gesture open while an agent edit arrives. Build before running that test; Linux installations may need `npx playwright install --with-deps chromium`.
+Build runs TypeScript checking and creates the browser bundle. The 49 automated tests exercise persistence, revision conflicts, retry recovery, artifact bytes, application orchestration, and the runtime adapter using test subprocesses. Two browser tests use the actual Excalidraw editor and capture path with a test-only provider: they draw and move saved shapes, receive annotations, send live notices, reload, and safely undo agent edits while preserving human work. They also hold a pointer gesture open while an agent edit arrives and compare close-up capture pixels before and after adding a distant object. Build before running these tests; Linux installations may need `npx playwright install --with-deps chromium`.
 
 These checks do not require provider authentication or model calls. GitHub CI runs the build and both test suites. Real-runtime verification remains a separate release gate. Node 24's built-in SQLite module may emit its standard experimental warning.
 

@@ -44,6 +44,7 @@ The local application now exists. Reviews during implementation produced regress
 - Image aspect ratio and editable arrow geometry, native stacking order, and human undo restoring a saved tombstone.
 - Duplicate mutation notifications and human undo missing from active-turn awareness.
 - Shared references between Excalidraw's mutable elements and canonical saved state, plus agent edits arriving during a pointer gesture.
+- Distant canvas content reducing regional capture detail and unscaled backing-canvas allocations.
 - Native advertised approval decisions, uncertain notice delivery, queued-message context, and completion arriving before a turn-start acknowledgment.
 
 The browser suite uses a test-only runtime to exercise the actual editor, capture path, application service, and store. The production application uses CodexRuntime. Live CLI initialization and thread creation succeeded, while inherited credentials prevented actual model inference. [Implementation evidence](implementation.md#runtime-status) records that remaining check without substituting fixture behavior for a real Codex run.
