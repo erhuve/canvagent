@@ -231,11 +231,42 @@ export function useBoard(notify: (message: string) => void) {
     try {
       await document.fonts.ready;
       const visible = snapshot.elements.filter(element => !element.isDeleted);
-      const [x1, y1, x2, y2] = visible.length ? getCommonBounds(visible as any) : [0, 0, 800, 500];
-      const bounds = region || { x: x1 - 24, y: y1 - 24, width: Math.max(64, x2 - x1 + 48), height: Math.max(64, y2 - y1 + 48) };
+      const [sceneX1, sceneY1, sceneX2, sceneY2] = visible.length ? getCommonBounds(visible as any) : [0, 0, 800, 500];
+      const bounds = region || { x: sceneX1 - 24, y: sceneY1 - 24, width: Math.max(64, sceneX2 - sceneX1 + 48), height: Math.max(64, sceneY2 - sceneY1 + 48) };
       if (![bounds.x, bounds.y, bounds.width, bounds.height].every(Number.isFinite) || bounds.width <= 0 || bounds.height <= 0) throw new Error("The requested capture region is invalid.");
-      const sourceScale = Math.min(1, 4096 / Math.max(1, x2 - x1, y2 - y1));
-      const source = visible.length ? await exportToCanvas({ elements: visible as any, files: snapshot.files, appState: { exportBackground: true, viewBackgroundColor: "#ffffff" }, exportPadding: 0, getDimensions: (width: number, height: number) => ({ width, height, scale: sourceScale }) }) : null;
+      const byId = new Map(visible.map(element => [element.id, element]));
+      const included = new Set<string>();
+      for (const element of visible) {
+        const [left, top, right, bottom] = getCommonBounds([element] as any, byId as any);
+        const margin = Math.max(8, (element.strokeWidth || 0) * 2);
+        if (right + margin >= bounds.x && left - margin <= bounds.x + bounds.width && bottom + margin >= bounds.y && top - margin <= bounds.y + bounds.height) included.add(element.id);
+      }
+      // Keep native parent frames so their children retain the editor's clipping.
+      for (const id of [...included]) {
+        let parent = byId.get(id)?.frameId;
+        const visited = new Set<string>();
+        while (parent && byId.has(parent) && !visited.has(parent)) {
+          visited.add(parent);
+          included.add(parent);
+          parent = byId.get(parent)?.frameId;
+        }
+      }
+      const relevant = visible.filter(element => included.has(element.id));
+      const frames = new Set(relevant.filter(element => element.type === "frame" || element.type === "magicframe").map(element => element.id));
+      const roots = relevant.filter(element => frames.has(element.id) || !element.frameId || !frames.has(element.frameId));
+      const [rootX, rootY] = roots.length ? getCommonBounds(roots as any) : [0, 0];
+      const padding = 8;
+      let sourceScale = 1;
+      const source = relevant.length ? await exportToCanvas({
+        elements: relevant as any,
+        files: snapshot.files,
+        appState: { exportBackground: true, viewBackgroundColor: "#ffffff", frameRendering: { enabled: true, clip: true, outline: true, name: false } },
+        exportPadding: padding,
+        getDimensions: (width: number, height: number) => {
+          sourceScale = Math.min(1, 4096 / Math.max(1, width, height));
+          return { width: Math.max(1, Math.ceil(width * sourceScale)), height: Math.max(1, Math.ceil(height * sourceScale)), scale: sourceScale };
+        },
+      }) : null;
       const scale = Math.min(1, 2048 / Math.max(bounds.width, bounds.height));
       const output = document.createElement("canvas");
       output.width = Math.max(1, Math.ceil(bounds.width * scale));
@@ -243,7 +274,7 @@ export function useBoard(notify: (message: string) => void) {
       const context = output.getContext("2d")!;
       context.fillStyle = "#ffffff";
       context.fillRect(0, 0, output.width, output.height);
-      if (source) context.drawImage(source, (x1 - bounds.x) * scale, (y1 - bounds.y) * scale, source.width * scale / sourceScale, source.height * scale / sourceScale);
+      if (source) context.drawImage(source, (rootX - padding - bounds.x) * scale, (rootY - padding - bounds.y) * scale, source.width * scale / sourceScale, source.height * scale / sourceScale);
       await api("/api/capture-result", { id, dataURL: output.toDataURL("image/png"), revision: snapshot.revision, bounds });
     } catch (error) {
       await api("/api/capture-result", { id, revision: snapshot.revision, error: errorMessage(error) }).catch(() => undefined);

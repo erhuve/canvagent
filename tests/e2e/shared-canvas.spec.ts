@@ -21,6 +21,14 @@ test('a real drawing, browser capture, agent note, live notice and safe undo sha
   const errors: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
   await page.goto('/');
+  await expect(page.locator('.excalidraw canvas.interactive')).toBeVisible();
+  const initial = await state(page);
+  const existing = initial.board.elements.filter((element: any) => !element.isDeleted);
+  if (existing.length) await page.evaluate(async ({ revision, operations }) => {
+    const response = await fetch('/api/board/mutate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ requestId: crypto.randomUUID(), observedBoardRevision: revision, operations }) });
+    if (!response.ok) throw new Error('Could not prepare an empty fixture board.');
+  }, { revision: initial.board.revision, operations: existing.map((element: any) => ({ kind: 'delete', elementId: element.id, expectedRevision: initial.board.metadata[element.id].revision })) });
+  if (initial.sessions.some((session: any) => session.messages.length)) await page.getByRole('button', { name: 'New conversation' }).click();
   await expect(page.getByRole('heading', { name: 'Think it through. Build it together.' })).toBeVisible();
   await drawRectangle(page, 290, 190);
   await expect.poll(async () => (await state(page)).board.elements.filter((element: any) => !element.isDeleted && element.type === 'rectangle').length).toBe(1);
@@ -45,7 +53,8 @@ test('a real drawing, browser capture, agent note, live notice and safe undo sha
   await page.mouse.up();
   await expect.poll(async () => (await state(page)).board.elements.find((element: any) => element.id === originalId).x).not.toBe(savedRectangle.x);
   expect((await state(page)).board.elements.find((element: any) => element.id === originalId).width).toBe(savedRectangle.width);
-  await page.getByRole('button', { name: 'Connect Codex', exact: true }).click();
+  const connect = page.getByRole('button', { name: 'Connect Codex', exact: true });
+  if (await connect.isVisible()) await connect.click();
   await expect(page.getByRole('button', { name: 'Codex connected', exact: true })).toBeVisible();
   await page.getByRole('textbox', { name: 'Message Codex' }).fill('Inspect this sketch and add an editable note. Keep working while I draw.');
   await page.getByRole('button', { name: 'Send message to Codex' }).click();
@@ -55,7 +64,8 @@ test('a real drawing, browser capture, agent note, live notice and safe undo sha
   // Editor normalization must not echo the agent's edit as a new human change.
   await page.waitForTimeout(1400);
   expect((await state(page)).board.revision).toBe(annotated.board.revision);
-  expect((await state(page)).sessions[0].activities.filter((activity: any) => activity.title.startsWith('Canvas revision'))).toHaveLength(0);
+  const settled = await state(page);
+  expect(settled.sessions.find((entry: any) => entry.id === settled.activeSessionId).activities.filter((activity: any) => activity.title.startsWith('Canvas revision'))).toHaveLength(0);
   await page.screenshot({ path: 'test-results/shared-canvas-annotated.png' });
 
   await drawRectangle(page, 280, 390);

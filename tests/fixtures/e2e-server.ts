@@ -30,6 +30,21 @@ class BrowserFixtureRuntime {
   private async run(text: string, turnId: string) {
     try {
       const read = textResult(await this.options.onTool('read_canvas', { scope: 'overview' }));
+      if (text.includes('[regional-capture]')) {
+        const near = read.elements.find((element: any) => element.type === 'rectangle');
+        if (!near) throw new Error('Draw a nearby rectangle before the regional capture check.');
+        const region = { x: near.x - 20, y: near.y - 20, width: near.width + 40, height: near.height + 40 };
+        const before = await this.options.onTool('capture_region', { region });
+        if (!before.success) throw new Error('Initial regional capture failed.');
+        textResult(await this.options.onTool('apply_canvas_ops', { requestId: `distant-${turnId}`, observedBoardRevision: read.revision, operations: [{ kind: 'create', elementId: `capture-distant-${turnId}`, shape: 'rectangle', x: 100000, y: 100000, width: 200, height: 100 }] }));
+        const after = await this.options.onTool('capture_region', { region });
+        if (!after.success) throw new Error('Regional capture with a distant object failed.');
+        const blank = await this.options.onTool('capture_region', { region: { x: -500000, y: -500000, width: 10000, height: 10000 } });
+        if (!blank.success) throw new Error('Large blank-region capture failed.');
+        this.options.onEvent({ type: 'item/agentMessage/delta', payload: { threadId: this.threadId, turnId, itemId: `regional-${turnId}`, delta: 'Regional capture checks complete.' } });
+        this.complete();
+        return;
+      }
       const capture = await this.options.onTool('capture_region', {});
       if (!capture.success || !capture.contentItems.some((item: any) => item.type === 'inputImage' && item.imageUrl?.startsWith('data:image/png;base64,'))) throw new Error('The real browser did not return a canvas PNG.');
       if (text.includes('[race]')) {
