@@ -161,6 +161,8 @@ The browser computes object differences against its acknowledged scene. It does 
 
 Undo names a mutationId and requestId. The service derives its inverse from beforeImages and checks that affected objects still have that mutation's resulting revisions. Undo is a new attributed batch; conflicts leave the board unchanged. Undoing a deletion may restore the same logical object from its tombstone through an internal restore operation; ordinary create never reuses a previously used ID. Native editor history and application mutation history must not apply the same inverse twice.
 
+The implementation also accepts a trusted human-only restore operation for native editor undo after a saved deletion. It checks the tombstone revision and original ID/type; agent tools cannot use it. Native fractional drawing order is preserved in saved arrays. The browser keeps canonical snapshots separate from objects Excalidraw may mutate and defers remote scene injection until an active pointer gesture finishes. The latest agent mutation ID is retained so its guarded undo remains available after reload.
+
 ## Agent canvas tools
 
 All tool requests and responses use schema version 1. Tools call the service directly through the provider adapter or through a transport such as MCP; behavior is identical.

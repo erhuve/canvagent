@@ -53,9 +53,11 @@ Open **http://127.0.0.1:5173** for the Vite development interface. The local bac
 ```sh
 npm run build
 npm test
+npx playwright install chromium
+npm run test:e2e
 ```
 
-The automated checks use test runtimes and do not require a Codex login or paid model calls. Node 24 may print its standard experimental warning for the built-in SQLite module.
+The automated checks use test runtimes and do not require a Codex login or paid model calls. The browser test exercises real drawing, capture, live notices, concurrent edits, reload, and guarded undo. Build before running it; on Linux, Playwright may require `npx playwright install --with-deps chromium`. Node 24 may print its standard experimental warning for the built-in SQLite module.
 
 ## Project documents
 

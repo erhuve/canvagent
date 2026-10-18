@@ -2,7 +2,7 @@
 
 Build a conventional local agent harness with a shared canvas available throughout each session. Keep a small end-to-end application running as capabilities are added.
 
-This is a planning roadmap; no phase is implemented yet. Phases 0 and 1 produce the first personal-use slice. Phases 2 through 5 develop that application into the local v1. The [contracts](contracts.md) are a design map, not a requirement to build every model or framework before using the app.
+The local-v1 code described by phases 0 through 5 is now implemented. Automated store, protocol, application, and browser checks exercise the shared interaction. Real model inference and its live canvas behavior still need verification with a fresh Codex login; the inherited cloud login returned an authorization error. See [implementation evidence](implementation.md#runtime-status) for the precise boundary. The phases below retain their goals and acceptance checks for ongoing development.
 
 ## Phase summary
 

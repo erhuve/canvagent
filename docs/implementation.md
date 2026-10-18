@@ -90,8 +90,12 @@ To reopen, use the same workspace and saved-data directory. To back up, stop Can
 ```sh
 npm run build
 npm test
+npx playwright install chromium
+npm run test:e2e
 ```
 
-Build runs TypeScript checking and creates the browser bundle. Automated tests exercise persistence, revision conflicts, retry recovery, artifact bytes, and the runtime adapter using test subprocesses. These checks do not require provider authentication or model calls. Real-runtime verification remains a separate release gate. Node 24's built-in SQLite module may emit its standard experimental warning.
+Build runs TypeScript checking and creates the browser bundle. The 49 automated tests exercise persistence, revision conflicts, retry recovery, artifact bytes, application orchestration, and the runtime adapter using test subprocesses. The browser test uses the actual Excalidraw editor and capture path with a test-only provider: it draws and moves saved shapes, receives annotations, sends live notices, reloads, and safely undoes agent edits while preserving human work. It also holds a pointer gesture open while an agent edit arrives. Build before running that test; Linux installations may need `npx playwright install --with-deps chromium`.
+
+These checks do not require provider authentication or model calls. GitHub CI runs the build and both test suites. Real-runtime verification remains a separate release gate. Node 24's built-in SQLite module may emit its standard experimental warning.
 
 The current application supports one editing browser, one project board, and one active agent turn at a time. Human multiplayer, additional providers, external MCP access, hosted operation, and portable project export remain follow-up work.

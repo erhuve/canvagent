@@ -35,3 +35,15 @@ Defer independent background rendering, full historical timelines, automated fil
 Draw two labeled boxes and ask Codex to inspect them. While it works, move a box and change a label. Confirm a batched resource notice reaches the active turn, the agent reads the latest state, and an editable annotation appears without erasing the human changes. Undo the annotation, then reopen and verify the saved board and source image remain intact.
 
 Run the basic draw/ask/annotation loop first; add this concurrency-and-notice test as those capabilities land.
+
+## Implementation review results
+
+The local application now exists. Reviews during implementation produced regression checks and fixes for:
+
+- Cross-session request-ID collisions, concurrent artifact publication, and retries after a lost mutation response.
+- Image aspect ratio and editable arrow geometry, native stacking order, and human undo restoring a saved tombstone.
+- Duplicate mutation notifications and human undo missing from active-turn awareness.
+- Shared references between Excalidraw's mutable elements and canonical saved state, plus agent edits arriving during a pointer gesture.
+- Native advertised approval decisions, uncertain notice delivery, queued-message context, and completion arriving before a turn-start acknowledgment.
+
+The browser suite uses a test-only runtime to exercise the actual editor, capture path, application service, and store. The production application uses CodexRuntime. Live CLI initialization and thread creation succeeded, while inherited credentials prevented actual model inference. [Implementation evidence](implementation.md#runtime-status) records that remaining check without substituting fixture behavior for a real Codex run.
