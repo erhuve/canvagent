@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.canvagent/
+*.sqlite*
+test-results/
+playwright-report/
+.env
+.env.*
+!.env.example
+*.log
