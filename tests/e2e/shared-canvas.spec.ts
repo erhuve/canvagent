@@ -67,6 +67,8 @@ test('a real drawing, browser capture, agent note, live notice and safe undo sha
   expect(scene.type).toBe('excalidraw');
   expect(scene.elements.some((element: any) => element.text === 'An editable note from Codex')).toBe(true);
 
+  await page.reload();
+  await expect(page.getByRole('button', { name: 'Undo agent edit' })).toBeVisible();
   await page.getByRole('button', { name: 'Undo agent edit' }).click();
   await expect.poll(async () => (await state(page)).board.elements.filter((element: any) => !element.isDeleted && element.text === 'An editable note from Codex').length).toBe(0);
   expect((await state(page)).board.elements.filter((element: any) => !element.isDeleted && element.type === 'rectangle')).toHaveLength(2);

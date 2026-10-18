@@ -69,8 +69,9 @@ export function useBoard(notify: (message: string) => void) {
     canonical.current = structuredClone({ ...incoming, files: incoming.files || {}, metadata: incoming.metadata || {} });
     files.current = { ...incoming.files, ...files.current };
     setBoard(canonical.current);
-    if (mutation?.actor === "agent") setAgentMutation(mutation.id);
-    if (mutation?.actor === "undo") setAgentMutation(undefined);
+    if (Object.hasOwn(incoming, "lastAgentMutation")) setAgentMutation(incoming.lastAgentMutation ?? undefined);
+    else if (mutation?.actor === "agent") setAgentMutation(mutation.id);
+    else if (mutation?.actor === "undo") setAgentMutation(undefined);
     if (previous && incoming.revision > previous.revision && mutation && mutation.actor !== "human") {
       // Native history has no revision guards. The shared undo endpoint does.
       if (pointerActive.current) clearHistoryAfterGesture.current = true;

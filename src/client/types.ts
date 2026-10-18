@@ -5,6 +5,7 @@ export type Board = {
   elements: SceneElement[];
   files: Record<string, any>;
   metadata: Record<string, { revision: number; actor: string }>;
+  lastAgentMutation?: string | null;
 };
 export type Message = {
   id: string;
