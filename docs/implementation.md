@@ -4,7 +4,16 @@ Canvagent now includes a React application, an embedded Excalidraw editor, a loc
 
 ## Runtime status
 
-Use Node.js 24 or newer. The Codex adapter targets CLI **0.159.2**, including experimental dynamic tools over the local app-server stdio protocol. Real-runtime smoke verification is in progress; compatibility with other CLI versions is not established. The UI displays the connected version, authentication state, and available models.
+Use Node.js 24 or newer. The Codex adapter targets CLI **0.159.2**, including experimental dynamic tools over the local app-server stdio protocol. A live smoke check verified the following with that CLI version:
+
+| Check | Evidence |
+| --- | --- |
+| Initialize, account read, and model catalog | The actual app-server returned responses. |
+| Thread creation with canvas dynamic-tool definitions | The actual app-server accepted `thread/start`. |
+| Turn submission | The actual app-server accepted `turn/start`; model inference then failed authentication. |
+| Model-driven canvas tool calls, image understanding, steering, and resumed inference | Still require live verification with working inference. Protocol and application tests exercise these contracts using controlled runtimes. |
+
+The model request returned HTTP 401 because the inherited ChatGPT login could not refresh its access token and requested a fresh sign-in. Complete the standard `codex login` flow before local use; the verification environment needs a fresh login to finish those live checks. Successful account discovery alone did not establish working model authentication. The UI displays the connected version, authentication state, and available models. Compatibility with other CLI versions is not established.
 
 Install [Codex CLI](https://developers.openai.com/codex/cli/) on `PATH` and run `codex login` using its normal authentication flow. Canvagent starts `codex app-server` and inherits that configuration. It does not ask you to copy credential files into the application.
 
@@ -71,6 +80,8 @@ One board belongs to the configured workspace/data directory and is shared by it
 Published records include the original filename, title, media type, byte size, SHA-256 digest, session attribution, and publication time. Downloads verify the retained digest. Source-image bytes and published-output bytes are stored separately from references in the scene. Changing or deleting a workspace source after publication does not change the published copy.
 
 Publication is explicit. The agent must call `publish_artifact` for a file inside the workspace, then use the returned artifact ID with `attach_artifact`. Ordinary workspace files are not automatically copied or exposed as artifacts. Raster attachments preserve image proportions; other published files appear as labeled download links.
+
+Browser export uses Excalidraw's native scene and image export features. Linked artifact bytes remain in Canvagent's managed storage; a scene export does not package all published files or conversation state. Keep the data directory when transferring or backing up that work.
 
 To reopen, use the same workspace and saved-data directory. To back up, stop Canvagent and copy that entire directory. Codex owns its native conversation history and authentication separately; an application-data backup does not include those runtime files.
 

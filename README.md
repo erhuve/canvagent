@@ -2,7 +2,7 @@
 
 Canvagent is a local Codex harness with a persistent Excalidraw canvas shared by you and your agent. Chat about a project, sketch an idea, drop in a screenshot, and let Codex inspect and annotate the same board while it works.
 
-**Status:** the local application is implemented. Real-runtime compatibility and end-to-end release checks are being verified. The adapter currently targets Codex CLI **0.159.2** and its experimental app-server protocol.
+**Status:** the local application is implemented. Codex CLI **0.159.2** accepted live initialization, thread creation, and turn submission; expired login credentials prevented inference. [Runtime evidence and remaining checks](docs/implementation.md#runtime-status) distinguish verified protocol behavior from model-driven canvas behavior still to verify.
 
 ## Run locally
 
