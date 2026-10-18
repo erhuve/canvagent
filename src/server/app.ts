@@ -28,6 +28,12 @@ export interface ApplicationOptions {
 export function createApplication(options: ApplicationOptions) {
   const workspace = realpathSync(options.workspace);
   const store = new Store(options.dataDir);
+  const storedWorkspace = store.get<string>('workspaceRoot');
+  if (storedWorkspace && storedWorkspace !== workspace) {
+    store.close();
+    throw new Error('This data directory belongs to another workspace. Choose a different --data-dir.');
+  }
+  store.set('workspaceRoot', workspace);
   const artifactFiles = new ArtifactFiles(workspace, join(options.dataDir, 'artifacts'));
   const app = express();
   const server = createServer(app);
@@ -48,6 +54,7 @@ export function createApplication(options: ApplicationOptions) {
   const captures = new Map<string, { revision: number; resolve: (value: any) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
   let noticeTimer: ReturnType<typeof setTimeout> | undefined;
   let noticeSending = false;
+  let noticeDeliveryBlocked = false;
   let pendingNotice: { sinceRevision: number; throughRevision: number; ids: Set<string>; deleted: Set<string> } | undefined;
   let lastBroadcastRevision = store.board().revision;
 
@@ -113,7 +120,7 @@ export function createApplication(options: ApplicationOptions) {
     noticeTimer = setTimeout(() => void sendNotice(), 800);
   }
   async function sendNotice() {
-    if (noticeSending || !pendingNotice || !runtime?.activeTurnId || !busySessionId) return;
+    if (noticeSending || noticeDeliveryBlocked || !pendingNotice || !runtime?.activeTurnId || !busySessionId) return;
     const session = findSession(busySessionId);
     if (session.status !== 'running') return;
     noticeSending = true;
@@ -128,6 +135,13 @@ export function createApplication(options: ApplicationOptions) {
       recordActivity(session, randomUUID(), 'canvas', `Canvas revision ${summary.throughRevision} shared with agent`, 'completed');
       runtimeState.capabilities.canvasChangeNotices = true; runtimeChanged(); sessionChanged(session);
     } catch (error) {
+      // Human edits may have populated this closure while steering awaited RPC.
+      const queuedNotice = pendingNotice as typeof summary | undefined;
+      const combinedIds = new Set([...summary.ids, ...(queuedNotice?.ids ?? [])]);
+      const current = store.board();
+      pendingNotice = { sinceRevision: summary.sinceRevision, throughRevision: current.revision,
+        ids: combinedIds, deleted: new Set(current.elements.filter(e => e.isDeleted && combinedIds.has(e.id)).map(e => e.id)) };
+      noticeDeliveryBlocked = true;
       runtimeState.capabilities.canvasChangeNotices = false; runtimeChanged();
       recordActivity(session, randomUUID(), 'canvas', 'Live canvas notice unavailable; latest state remains readable', 'failed', String(error));
       sessionChanged(session);
@@ -146,15 +160,15 @@ export function createApplication(options: ApplicationOptions) {
       socket.send(JSON.stringify({ type: 'capture', id, board, region }));
     });
   }
-  const tools = new CanvasTools({ store, artifactFiles, capture, sessionId: () => busySessionId, changed: boardChanged });
+  const tools = new CanvasTools({ store, artifactFiles, capture, sessionId: () => busySessionId ?? sessions.find(s => s.threadId === runtime?.threadId)?.id, changed: boardChanged });
 
   function onRuntimeEvent(event: RuntimeEvent) {
     const p = event.payload ?? {};
     if (event.type === 'connection.changed') {
       runtimeState.connected = p.state === 'connected';
       if (p.state === 'disconnected') {
-        runtimeState.error = p.message ?? 'Codex disconnected.';
-        if (busySessionId) { const s = findSession(busySessionId); s.status = 'unknown'; s.pendingApprovals = []; systemMessage(s, 'Codex disconnected. The saved conversation and board are retained.'); sessionChanged(s); busySessionId = undefined; }
+        runtimeState.error = p.intentional && !busySessionId ? undefined : p.reason ?? p.message ?? 'Codex disconnected.';
+        if (busySessionId && (!p.intentional || p.activeTurnId)) { const s = findSession(busySessionId); s.status = 'unknown'; s.pendingApprovals = []; systemMessage(s, 'Codex disconnected. The saved conversation and board are retained.'); sessionChanged(s); busySessionId = undefined; }
       }
       runtimeChanged(); return;
     }
@@ -166,6 +180,7 @@ export function createApplication(options: ApplicationOptions) {
       if (!message) { message = { id, role: 'assistant', text: '', createdAt: now(), turnId: p.turnId }; session.messages.push(message); }
       message.text += p.delta ?? '';
     } else if (event.type === 'turn/started') {
+      busySessionId = session.id;
       session.turnId = p.turn?.id ?? p.turnId; session.status = 'running';
     } else if (event.type === 'item/started' || event.type === 'item/completed') {
       const item = p.item ?? {};
@@ -189,6 +204,7 @@ export function createApplication(options: ApplicationOptions) {
       if (p.turn?.error) systemMessage(session, p.turn.error.message ?? JSON.stringify(p.turn.error));
       if (busySessionId === session.id) busySessionId = undefined;
       pendingNotice = undefined;
+      noticeDeliveryBlocked = false;
       sessionChanged(session);
       if (session.queued.length) { const queued = session.queued.shift()!; persist(); queueMicrotask(() => void dispatch(session, queued.text, queued.selection, queued.id).catch(error => failTurn(session, error))); }
       return;
@@ -216,6 +232,7 @@ export function createApplication(options: ApplicationOptions) {
       onApproval: request => {
         const s = sessions.find(candidate => candidate.threadId === request.params?.threadId) ?? (busySessionId ? findSession(busySessionId) : undefined);
         if (!s) return;
+        busySessionId ??= s.id;
         const p = request.params ?? {};
         const advertised = p.availableDecisions?.filter((decision: unknown) => typeof decision === 'string');
         const special = request.method.includes('permissions') ? ['accept', 'decline'] : request.method.includes('requestUserInput') ? ['answer'] : request.method.includes('elicitation') ? ['decline', 'cancel'] : ['accept', 'decline', 'cancel'];
@@ -265,6 +282,7 @@ export function createApplication(options: ApplicationOptions) {
       sessionChanged(session); return;
     }
     const canvasContext = context(session, selection);
+    noticeDeliveryBlocked = false;
     const nativeTurnId = await runtime!.start(`${text}\n\n[Canvagent canvas resource context]\n${JSON.stringify(canvasContext)}`, id);
     session.contextRevision = canvasContext.revision;
     if (busySessionId === session.id) { session.turnId = nativeTurnId; if (session.status === 'starting') session.status = 'running'; }
@@ -319,7 +337,13 @@ export function createApplication(options: ApplicationOptions) {
     store.set(receiptKey, { input: JSON.stringify(input), result }); sessionChanged(session);
     if (busySessionId === session.id) {
       if (runtime?.activeTurnId && session.status === 'running') {
-        try { await runtime.steer(`${input.text}\n\n[Current canvas resource context]\n${JSON.stringify(context(session, input.selection))}`, runtime.activeTurnId); }
+        try {
+          const current = context(session, input.selection);
+          await runtime.steer(`${input.text}\n\n[Current canvas resource context]\n${JSON.stringify(current)}`, runtime.activeTurnId);
+          session.contextRevision = current.revision;
+          if (pendingNotice && pendingNotice.throughRevision <= current.revision) pendingNotice = undefined;
+          noticeDeliveryBlocked = false;
+        }
         catch (error: any) {
           if (error?.uncertain) { session.status = 'unknown'; systemMessage(session, 'The update outcome is uncertain. It will not be automatically resent.'); }
           else { session.queued.push({ id: input.requestId, text: input.text, selection: input.selection }); systemMessage(session, 'Update queued for the next turn.'); }

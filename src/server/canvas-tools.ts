@@ -1,6 +1,7 @@
 import { createHash, randomInt } from 'node:crypto';
 import { z } from 'zod';
 import { imageSize } from 'image-size';
+import { generateKeyBetween } from 'fractional-indexing';
 import type { Store } from './store.js';
 import type { ArtifactFiles } from './artifacts.js';
 import type { Artifact } from '../shared/types.js';
@@ -123,10 +124,14 @@ export class CanvasTools {
       if (name === 'apply_canvas_ops') {
         const args = applySchema.parse(raw);
         const board = store.board();
+        let appendIndex = board.elements.reduce<string | null>((last, element) => typeof element.index === 'string' && (!last || element.index > last) ? element.index : last, null);
         const operations = args.operations.map((op, index) => {
           if (op.kind === 'create') {
             const elementId = op.elementId ?? createHash('sha256').update(`${this.options.sessionId()}:${args.requestId}:${index}`).digest('hex').slice(0, 24);
-            return { kind: 'create', elementId, element: nativeShape(op.shape, op, elementId) };
+            const element = nativeShape(op.shape, op, elementId);
+            appendIndex = generateKeyBetween(appendIndex, null);
+            element.index = appendIndex;
+            return { kind: 'create', elementId, element };
           }
           if (op.kind === 'delete') return op;
           const { kind, elementId, expectedRevision, ...patch } = op;
@@ -192,6 +197,8 @@ export class CanvasTools {
           Object.assign(element, { type: 'image', fileId, width, height: width * dimensions.height / dimensions.width, scale: [1, 1], status: 'saved', crop: null, roundness: null });
         }
         element.link = `/api/artifacts/${artifact.id}`;
+        const lastIndex = store.board().elements.reduce<string | null>((last, item) => typeof item.index === 'string' && (!last || item.index > last) ? item.index : last, null);
+        element.index = generateKeyBetween(lastIndex, null);
         element.customData = { canvagent: { artifactId: artifact.id, author: 'agent' } };
         const pending = store.get<any>(`${key}:command`);
         const command = pending ?? { requestId: args.requestId, observedBoardRevision: store.board().revision, operations: [{ kind: 'create', elementId, element }] };
