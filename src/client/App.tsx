@@ -53,6 +53,7 @@ export default function App() {
   const transcript = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true);
   const lastNotice = useRef("");
+  const submission = useRef<{ key: string; requestId: string }>();
   const notify = useCallback((message: string) => {
     setToast(message);
     clearTimeout(toastTimer.current);
@@ -177,7 +178,10 @@ export default function App() {
       let target = session;
       if (!target) target = await createSession();
       if (!target) return;
-      await api(`/api/sessions/${encodeURIComponent(target.id)}/messages`, { text: text.trim(), requestId: crypto.randomUUID(), selection: { elementIds: canvas.selectedIds } });
+      const key = JSON.stringify([target.id, text.trim(), canvas.selectedIds]);
+      if (submission.current?.key !== key) submission.current = { key, requestId: crypto.randomUUID() };
+      await api(`/api/sessions/${encodeURIComponent(target.id)}/messages`, { text: text.trim(), requestId: submission.current.requestId, selection: { elementIds: canvas.selectedIds } });
+      submission.current = undefined;
       setText("");
       stickToBottom.current = true;
     } catch (error) { notify(errorMessage(error)); }

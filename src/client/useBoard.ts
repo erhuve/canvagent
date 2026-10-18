@@ -88,7 +88,7 @@ export function useBoard(notify: (message: string) => void) {
     }
     if (conflicted.current) return false;
     const current = canonical.current;
-    if (!current || !pending.current.size) return true;
+    if (!current || !pending.current.size) { setSaveStatus("saved"); setSaveError(""); return true; }
     const edits = new Map([...pending.current].map(([id, edit]) => [id, { ...edit }]));
     inFlight.current = edits;
     setSaveStatus("saving");
