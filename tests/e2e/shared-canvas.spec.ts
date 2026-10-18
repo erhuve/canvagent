@@ -35,11 +35,16 @@ test('a real drawing, browser capture, agent note, live notice and safe undo sha
   const surfaceBounds = (await surface.boundingBox())!;
   const savedRectangle = (await state(page)).board.elements.find((element: any) => element.id === originalId);
   await page.keyboard.press('v');
-  await page.mouse.move(surfaceBounds.x + savedRectangle.x + savedRectangle.width / 2, surfaceBounds.y + savedRectangle.y + savedRectangle.height / 2);
+  const moveStart = { x: surfaceBounds.x + savedRectangle.x + savedRectangle.width * .3, y: surfaceBounds.y + savedRectangle.y + 1 };
+  // An unfilled rectangle is hit on its stroke; avoid the corner/midpoint resize handles.
+  await page.mouse.click(moveStart.x, moveStart.y);
+  await expect(page.locator('.selection-chip')).toContainText('1 object selected');
+  await page.mouse.move(moveStart.x, moveStart.y);
   await page.mouse.down();
-  await page.mouse.move(surfaceBounds.x + savedRectangle.x + savedRectangle.width / 2 + 42, surfaceBounds.y + savedRectangle.y + savedRectangle.height / 2 + 27, { steps: 8 });
+  await page.mouse.move(moveStart.x + 42, moveStart.y + 27, { steps: 8 });
   await page.mouse.up();
   await expect.poll(async () => (await state(page)).board.elements.find((element: any) => element.id === originalId).x).not.toBe(savedRectangle.x);
+  expect((await state(page)).board.elements.find((element: any) => element.id === originalId).width).toBe(savedRectangle.width);
   await page.getByRole('button', { name: 'Connect Codex', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Codex connected', exact: true })).toBeVisible();
   await page.getByRole('textbox', { name: 'Message Codex' }).fill('Inspect this sketch and add an editable note. Keep working while I draw.');
