@@ -2,6 +2,7 @@ import { createHash, randomInt, randomUUID } from 'node:crypto';
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { generateKeyBetween } from 'fractional-indexing';
 
 /** Native editor fields are deliberately opaque here; the editor adapter owns their schema. */
 export type CanvasElement = { id: string; type: string; isDeleted?: boolean; [key: string]: any };
@@ -18,6 +19,7 @@ type SavedBoard = Omit<Board, 'files'>;
 export type CanvasOperation =
   | { kind: 'create'; elementId: string; element: Record<string, any> }
   | { kind: 'update'; elementId: string; expectedRevision: number; patch: Record<string, any> }
+  | { kind: 'restore'; elementId: string; expectedRevision: number; patch: Record<string, any> }
   | { kind: 'delete'; elementId: string; expectedRevision: number };
 export type CanvasMutationCommand = {
   requestId: string;
@@ -83,6 +85,15 @@ function elementReferences(element: CanvasElement): string[] {
   const references = [element.containerId, element.frameId, element.startBinding?.elementId, element.endBinding?.elementId];
   if (Array.isArray(element.boundElements)) references.push(...element.boundElements.map((bound: any) => bound?.id));
   return references.filter((id): id is string => typeof id === 'string');
+}
+
+/** Native scene arrays and fractional indices must describe the same stacking order. */
+function orderNativeElements(elements: CanvasElement[]): CanvasElement[] {
+  const indexed = elements.every(element => {
+    if (typeof element.index !== 'string' || !element.index.length) return false;
+    try { generateKeyBetween(element.index, null); return true; } catch { return false; }
+  });
+  return indexed ? elements.toSorted((left, right) => left.index < right.index ? -1 : left.index > right.index ? 1 : 0) : elements;
 }
 
 /** One synchronous transaction owns scene, per-element revisions, mutation history, and retry receipts. */
@@ -196,10 +207,13 @@ export class Store {
         if (operation.kind === 'create') {
           if (!object(operation.element) || operation.element.id !== operation.elementId || typeof operation.element.type !== 'string' || operation.element.isDeleted) return fail('A create needs a live native element with the matching ID and type.');
           if (existing || Object.hasOwn(board.metadata, operation.elementId)) conflicts.push({ elementId: operation.elementId, expectedRevision: null, currentRevision: board.metadata[operation.elementId]?.revision ?? null, currentElement: existing ?? null });
-        } else if (operation.kind === 'update' || operation.kind === 'delete') {
+        } else if (operation.kind === 'update' || operation.kind === 'delete' || operation.kind === 'restore') {
           if (!revision(operation.expectedRevision)) return fail('Updates and deletes need a valid expectedRevision.');
-          if (!existing || existing.isDeleted || board.metadata[operation.elementId]?.revision !== operation.expectedRevision) conflicts.push({ elementId: operation.elementId, expectedRevision: operation.expectedRevision, currentRevision: board.metadata[operation.elementId]?.revision ?? null, currentElement: existing ?? null });
-          if (operation.kind === 'update' && (!object(operation.patch) || (operation.patch.id !== undefined && operation.patch.id !== operation.elementId) || (existing && operation.patch.type !== undefined && operation.patch.type !== existing.type))) return fail('A patch cannot replace the element ID or type.');
+          const restoring = operation.kind === 'restore';
+          if (restoring && actor !== 'human') return fail('Restore is reserved for human editor history; agent updates cannot revive a deleted object.');
+          if (!existing || (restoring ? !existing.isDeleted : existing.isDeleted) || board.metadata[operation.elementId]?.revision !== operation.expectedRevision) conflicts.push({ elementId: operation.elementId, expectedRevision: operation.expectedRevision, currentRevision: board.metadata[operation.elementId]?.revision ?? null, currentElement: existing ?? null });
+          if ((operation.kind === 'update' || restoring) && (!object(operation.patch) || (operation.patch.id !== undefined && operation.patch.id !== operation.elementId) || (existing && operation.patch.type !== undefined && operation.patch.type !== existing.type))) return fail('A patch cannot replace the element ID or type.');
+          if (restoring && operation.patch.isDeleted !== false) return fail('Restore must explicitly revive the same deleted object.');
         } else return fail('Unknown canvas operation.');
       }
       if (conflicts.length) return { ok: false, code: 'CONFLICT', message: 'Affected elements changed; read and rebase this edit.', boardRevision: board.revision, conflicts };
@@ -211,6 +225,7 @@ export class Store {
         beforeImages[operation.elementId] = existing ? clone(existing) : null;
         if (operation.kind === 'create') current.set(operation.elementId, clone(operation.element) as CanvasElement);
         else if (operation.kind === 'update') current.set(operation.elementId, nativeChange(existing!, clone(operation.patch)));
+        else if (operation.kind === 'restore') current.set(operation.elementId, nativeChange(existing!, clone(operation.patch), true));
         else current.set(operation.elementId, nativeChange(existing!, { isDeleted: true }));
         afterRevisions[operation.elementId] = (board.metadata[operation.elementId]?.revision ?? 0) + 1;
       }
@@ -263,6 +278,7 @@ export class Store {
   }
 
   private commitMutation(board: SavedBoard, elements: CanvasElement[], mutation: Mutation, actor: string): MutationResult {
+    elements = orderNativeElements(elements);
     const metadata = { ...board.metadata };
     const changedMetadata: Record<string, ElementMetadata> = {};
     for (const [id, nextRevision] of Object.entries(mutation.afterRevisions)) {

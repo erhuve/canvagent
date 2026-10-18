@@ -127,7 +127,7 @@ test('undo conflicts preserve later human edits while unrelated later edits surv
   assert.deepEqual(store.board(), before);
 });
 
-test('deleted native elements retain tombstones and only undo can restore their identity', t => {
+test('deleted native elements retain tombstones and ordinary create cannot reuse their identity', t => {
   const { store } = fixture(t);
   create(store, 'box');
   const deleted = success(store.mutate({ requestId: 'delete', observedBoardRevision: 1, operations: [{ kind: 'delete', elementId: 'box', expectedRevision: 1 }] }, 'agent'));
@@ -136,6 +136,47 @@ test('deleted native elements retain tombstones and only undo can restore their 
   success(store.undo(deleted.mutationId, 'restore', 'user'));
   assert.equal(store.board().elements[0].isDeleted, false);
   assert.equal(store.board().metadata.box.revision, 3);
+});
+
+test('native human undo can restore the same tombstone; agent and stale restores cannot', t => {
+  const { store } = fixture(t);
+  create(store, 'box');
+  success(store.mutate({ requestId: 'delete-box', observedBoardRevision: 1, operations: [{ kind: 'delete', elementId: 'box', expectedRevision: 1 }] }, 'human'));
+  const restore = { requestId: 'native-restore', observedBoardRevision: 2, operations: [{ kind: 'restore' as const, elementId: 'box', expectedRevision: 2, patch: rectangle('box', { version: 3 }) }] };
+  failure(store.mutate(restore, 'agent'), 'VALIDATION_FAILED');
+  failure(store.mutate({ requestId: 'agent-update', observedBoardRevision: 2, operations: [{ kind: 'update', elementId: 'box', expectedRevision: 2, patch: { isDeleted: false } }] }, 'agent'), 'CONFLICT');
+  failure(store.mutate({ ...restore, requestId: 'different-type', operations: [{ ...restore.operations[0], patch: { isDeleted: false, type: 'text' } }] }, 'human'), 'VALIDATION_FAILED');
+  const revived = success(store.mutate(restore, 'human'));
+  assert.equal(store.board().elements[0].isDeleted, false);
+  assert.equal(store.board().elements[0].type, 'rectangle');
+  assert.equal(store.board().metadata.box.revision, 3);
+  assert.ok(store.board().elements[0].version > 2);
+  assert.deepEqual(store.mutate(restore, 'human'), revived);
+  success(store.mutate({ requestId: 'delete-again', observedBoardRevision: 3, operations: [{ kind: 'delete', elementId: 'box', expectedRevision: 3 }] }, 'human'));
+  failure(store.mutate({ ...restore, requestId: 'stale-restore' }, 'human'), 'CONFLICT');
+  assert.equal(store.board().elements[0].isDeleted, true);
+});
+
+test('native index edits persist the matching stacking order, including after undo and reopen', t => {
+  const { store, directory } = fixture(t);
+  create(store, 'bottom', { index: 'a0' });
+  create(store, 'middle', { index: 'a1' });
+  create(store, 'top', { index: 'a2' });
+  const reordered = success(store.mutate({ requestId: 'bring-to-front', observedBoardRevision: 3, operations: [{ kind: 'update', elementId: 'bottom', expectedRevision: 1, patch: { index: 'a3', version: 4, customData: { opaque: 'preserved' } } }] }, 'human'));
+  assert.deepEqual(store.board().elements.map(element => element.id), ['middle', 'top', 'bottom']);
+  assert.deepEqual(store.board().elements[2].customData, { opaque: 'preserved' });
+  const reopened = new Store(directory);
+  try { assert.deepEqual(reopened.board().elements.map(element => element.id), ['middle', 'top', 'bottom']); } finally { reopened.close(); }
+  success(store.undo(reordered.mutationId, 'undo-reorder', 'human'));
+  assert.deepEqual(store.board().elements.map(element => element.id), ['bottom', 'middle', 'top']);
+});
+
+test('equal native indices keep stable order; incomplete legacy indices do not invent ordering', t => {
+  const { store } = fixture(t);
+  create(store, 'first', { index: 'a1' });
+  create(store, 'second', { index: 'a1' });
+  create(store, 'legacy', { index: undefined });
+  assert.deepEqual(store.board().elements.map(element => element.id), ['first', 'second', 'legacy']);
 });
 
 test('dependent references are validated atomically and prevent destructive undo', t => {
