@@ -11,12 +11,13 @@ The agent knows the canvas exists throughout the session. It can understand sket
 - [Phases of work](docs/roadmap.md): dependencies, deliverables, exit gates, and the v1 release boundary.
 - [Architecture](docs/architecture.md): components, state ownership, runtime integration, and recovery.
 - [Data models and contracts](docs/contracts.md): entities, board operations, canvas context, agent tools, runtime adapter, and UI transport.
+- [Adversarial review](docs/adversarial-review.md): material findings, minimal fixes, and what remains to prove.
 
 ## Product experience
 
 Open a project, start or resume a normal agent conversation, and use chat and the canvas together. Sketch a settings screen, select it, and ask the agent to build it. The agent inspects the sketch, performs ordinary project work, and places an annotated screenshot or artifact link near the drawing. Edit the drawing and continue the conversation.
 
-Canvas context is supplied automatically. Individual pen strokes update the resource; explicit user requests tell the agent when to act. Canvas use is optional for any particular task.
+Canvas context is supplied automatically. During an active turn, committed human edits produce batched resource-change notices when the runtime supports them; explicit messages give instructions. Idle drawing stays idle. Canvas use is optional for any particular task.
 
 ## Architecture at a glance
 
@@ -38,16 +39,16 @@ Canvagent owns the UI, session coordination, canvas awareness, saved board, and 
 
 The local service is authoritative for board state. Both the browser and agent submit validated, atomic edits with per-object revision checks. Agent changes are attributed and support safe undo. Excalidraw native scene data remains the saved visual representation.
 
-The proposed stack is TypeScript, React, Excalidraw, a local Node.js service, SQLite, managed file storage, and a pinned Codex app-server integration. Phase 0 verifies the exact tool, rendering, image, approval, and resume paths.
+The proposed stack is TypeScript, React, Excalidraw, a local Node.js service, SQLite, managed file storage, and a pinned Codex app-server integration. First prove chat → canvas read → editable annotation, then save/reopen that working application. Initially capture images through the connected browser. Add lifecycle, live notices, artifacts, and recovery incrementally.
 
 ## Delivery phases
 
 | Phase | Outcome |
 | --- | --- |
-| 0 | Prove runtime and editor integration. |
-| 1 | Establish models, contracts, and durable state. |
+| 0 | Prove chat, visual inspection, and editable agent drawing in one small application. |
+| 1 | Save and reopen that working loop with basic edit correctness. |
 | 2 | Build ordinary chat, tools, approvals, cancellation, and resume. |
-| 3 | Add shared canvas tools, automatic awareness, conflicts, and undo. |
+| 3 | Complete automatic awareness, mid-run notices, and editing ergonomics. |
 | 4 | Complete visual feedback and artifact workflows. |
 | 5 | Verify recovery and ship the local v1. |
 

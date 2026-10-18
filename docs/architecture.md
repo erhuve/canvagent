@@ -2,7 +2,7 @@
 
 Canvagent is a local agent harness with chat and a persistent canvas shared by the user and agent. The first implementation reuses Codex's runtime and embeds Excalidraw. The local Canvagent service coordinates both surfaces and owns the saved board.
 
-This is the proposed v1 design. The [roadmap](roadmap.md) identifies the feasibility checks before implementation; the [contracts](contracts.md) define the important data and boundaries.
+This is the proposed v1 design. The [roadmap](roadmap.md) grows a small working application incrementally; the [contracts](contracts.md) describe the target boundaries, implemented as their features arrive. See the [adversarial review](adversarial-review.md) for the practical tradeoffs.
 
 ## Scope and deployment
 
@@ -24,7 +24,7 @@ flowchart TB
     CS["Canvas and artifact service"]
     RA["Codex adapter"]
     RT["Codex app-server subprocess"]
-    RW["Canvas render worker"]
+    RW["Browser capture adapter"]
     DB["SQLite and managed files"]
     MCP["Later: MCP interface"]
 
@@ -33,7 +33,7 @@ flowchart TB
     SC <-->|"context and canvas tool calls"| CS
     SC <-->|"messages and normalized events"| RA
     RA <-->|"local stdio protocol"| RT
-    CS --> RW
+    CS <-->|"render committed snapshot"| RW
     CS <--> DB
     SC <--> DB
     MCP <-->|"same canvas contracts"| CS
@@ -46,11 +46,11 @@ flowchart TB
 | Session controller | Project/session association, turn lifecycle, explicit user instructions, event routing, and pending approval correlation. |
 | Context builder | Bounded board overview, changed-object summaries, selection references, and delivery receipts. |
 | Canvas service | Canonical board state, revision checks, atomic mutations, undo records, image references, and artifact attachment. |
-| Render worker | Regional images of a specific committed board revision, including its managed image files and fonts. |
+| Capture adapter | Initially asks the connected browser to export a committed board snapshot with its managed image files. Returns an explicit unavailable result when no renderer is connected. |
 | Codex adapter | Translation between Canvagent contracts and a pinned app-server version, tool registration, streaming, cancel, resume, and approvals. |
 | Codex runtime | Agent loop, model interaction, built-in file and command tools, execution policies, sandbox, and provider conversation history. |
 
-These are modules within one application. Only the Codex subprocess and render worker need process isolation; there is no microservice requirement.
+These are modules within one application. Start with a single Codex integration and ordinary functions between modules. A general provider framework, independent render worker, and event-sourcing system are not prerequisites.
 
 ## State ownership
 
@@ -65,11 +65,11 @@ The service serializes committed mutations. Each successful batch increments the
 ## User request and agent response
 
 1. The user sends a message, optionally with selected objects or a region. The UI flushes and acknowledges pending board edits first.
-2. The controller records the user message, creates a turn, and builds canvas context from a committed revision.
+2. The controller records the user message and its send-time board reference. When the message is dispatched, it creates a turn and builds fresh canvas context from the current committed board, resolving selected objects by their stable IDs.
 3. The adapter submits the instruction and clearly separated canvas context to Codex. Context identifies the board and available canvas tools even when no objects were explicitly selected.
 4. Codex performs normal work. A canvas tool call returns through the adapter to the same canvas service the browser uses.
 5. A validated agent edit commits atomically, records attribution, and broadcasts the new board revision. The editor reconciles that update without echoing it back as a human edit.
-6. Generated files are registered as durable artifacts before their previews or references are attached to the board.
+6. The agent calls publish_artifact for a generated workspace file, receives a stable artifact ID, then uses attach_artifact to place its preview or reference on the board.
 7. Chat and tool events continue normally; the runtime completes, fails, or interrupts the turn.
 
 Canvas tool failures return structured results to the agent so it can inspect current state and recover. A failed annotation does not erase the conversation or falsely mark ordinary project work as complete.
@@ -80,13 +80,23 @@ Session instructions describe the canvas and when to use it. Every user turn inc
 
 A delivery receipt tracks what context was submitted to the provider. It does not claim the model understood or fully inspected the whole board. A regional tool read also records its scope and revision; it does not advance a global observation cursor past unseen changes.
 
-Drawing while a turn runs updates the shared resource and pending change summary. The agent's next canvas read sees current committed state. An explicit "Send update to agent" action supplies a new instruction through steering when supported, or visibly queues it for the next turn. A drawing change alone does not start a model request.
+While a turn runs, coalesce committed human edits into a short, debounced resource notice containing the board revision and changed/deleted object IDs. Deliver it to the expected active turn through the runtime's verified steering/input path at its next supported processing boundary. Keep at most one pending summary and combine new changes while delivery is in progress. Agent-originated edits do not trigger these notices.
 
-Board text and imported images are supplied as user-authored context, separate from application instructions. The agent may inspect and annotate proactively as part of a requested task.
+A notice says that the shared resource changed; it does not turn board text into a new task. It may cause another model step within the existing turn. It never starts or restarts a turn, and idle drawing stays idle. Record the revision actually accepted by the runtime; retain subsequent or undelivered changes. If the turn ends before delivery, carry them into the next turn's context.
+
+Automatic mid-run notices are a product target to verify in phase 0. If the chosen runtime cannot deliver them, show that live notices are unavailable and keep the latest state available through reads and next-turn context. That fallback is an explicit early limitation, not a claim of live delivery.
+
+An explicit "Send update to agent" action sends a user instruction immediately through supported steering, or visibly queues it. It bypasses the drawing debounce. The agent's next canvas read always sees current committed state by default.
+
+Board text and imported images are supplied as user-authored context, separate from application instructions. The agent may inspect and annotate proactively as part of a requested task. Session guidance requires a fresh read and, for visual claims, a capture when asked to inspect the current canvas; a compact overview alone does not establish what the drawing looks like.
+
+A message's saved CanvasReference documents what the user pointed at when sending it. It does not freeze every later read to that revision. Current reads are the default, including after a queued message dispatches. Explicit historical requests may name a retained revision; missing snapshots return a clear unavailable result. Deleted selected objects remain visibly missing instead of being replaced by other targets.
 
 ## Rendering and artifacts
 
-Rendering must not depend on the editing browser remaining open. The proposed implementation uses the pinned Excalidraw export code in a local headless browser worker. Phase 0 must prove that text, fonts, images, and region bounds render correctly from a saved snapshot.
+Initially use Excalidraw's export code in the connected editing browser. Export a supplied committed snapshot, including its managed image files, rather than taking a screenshot of an optimistic editor view with unsaved changes. Phase 0 proves text, images, and region bounds through this path. If the browser disconnects, capture_region returns RESOURCE_UNAVAILABLE while the normal agent session may continue.
+
+Browser-independent rendering is a later improvement when closed-browser use becomes valuable; it is not an early build gate.
 
 Every capture names the board revision actually rendered. A slow render never silently substitutes a newer board. If that revision is no longer available, return an explicit error.
 
@@ -94,7 +104,7 @@ An artifact is an immutable managed file with a stable ID, media type, byte size
 
 ## Runtime integration
 
-Use a small provider adapter around Codex app-server. Phase 0 verifies the exact supported protocol for session creation, tool registration, image inputs/results, streamed events, approvals, cancellation, and resume. Record the working CLI version and authentication path.
+Use a small adapter around Codex app-server. The first slice verifies a real thread, streaming, canvas tools, image delivery, and the native approval route. Probe mid-run notice delivery and record what works. Extend cancellation, reconnect, and resume alongside the normal session lifecycle instead of blocking the first drawing demo on all of them. Record the working CLI version and authentication path.
 
 Prefer native client-defined tools when the pinned runtime supports the required contract. If that path cannot serve these tools reliably, a local MCP transport may connect the same handlers to Codex. Tool schemas and board semantics stay the same in either case.
 
@@ -107,6 +117,8 @@ After an uncertain submission or a lost runtime connection, reconcile the existi
 Saved means the backend acknowledged a durable transaction. The UI shows saving, saved, disconnected, and conflicted states. On reconnect, fetch a current board snapshot and replay durable session events after the client's cursor. Replay events update presentation and never repeat their side effects.
 
 Store assets completely before committing scene references to them. A crash can leave an unreferenced file, which can be cleaned up later; it must not leave a successfully acknowledged board pointing to bytes that were never written.
+
+Start with small boards, current snapshots, and straightforward request receipts. Add message checkpoints and event recovery with the harness lifecycle; broad history retention, cleanup automation, and exhaustive recovery matrices can follow actual need.
 
 Undo is a new revision-checked mutation derived from the original batch's before-images. It cannot restore an entire old board over later edits. If affected objects changed afterward, report a conflict and let the user inspect it.
 

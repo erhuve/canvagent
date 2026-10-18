@@ -1,122 +1,124 @@
 # Phases of work
 
-Build a conventional local agent harness with a shared canvas available throughout each session. The first release is complete only when normal agent work and the canvas work together, including durable images, artifacts, conflict handling, and safe undo.
+Build a conventional local agent harness with a shared canvas available throughout each session. Keep a small end-to-end application running as capabilities are added.
 
-This is a planning roadmap. No phase is implemented yet. Each phase starts after its dependencies pass; phases 0 through 5 define the local v1 release. Dates and effort estimates should follow the phase 0 findings.
+This is a planning roadmap; no phase is implemented yet. Phases 0 and 1 produce the first personal-use slice. Phases 2 through 5 develop that application into the local v1. The [contracts](contracts.md) are a design map, not a requirement to build every model or framework before using the app.
 
 ## Phase summary
 
 | Phase | Result | Depends on |
 | --- | --- | --- |
-| 0. Integration feasibility | Prove the real runtime and editor path; pin versions and capability decisions. | None |
-| 1. Models and durable state | Establish shared schemas, storage, and revision-checked mutation engine. | 0 |
-| 2. Ordinary agent harness | Deliver chat, tools, permissions, cancellation, and session resume. | 1 |
-| 3. Shared canvas and awareness | Connect human and agent editing with automatic context and safe undo. | 1, 2 |
-| 4. Complete project workflow | Publish artifacts and continue work from visual feedback. | 3 |
-| 5. Recovery and local release | Validate failure handling and ship a reproducible local installation. | 4 |
+| 0. Small integration loop | Chat, canvas inspection, and an editable agent response in a runnable application. | None |
+| 1. Save the working loop | Reopen the same board/images/session association; basic shared-edit correctness. | 0 |
+| 2. Ordinary session lifecycle | Tools, native permissions, cancellation, reconnect, and resume. | 1 |
+| 3. Awareness and live notices | Current context, automatic active-turn notices, and convenient visual references. | 1, 2 |
+| 4. Generated outputs on the board | Publish a workspace file and attach its durable preview or reference. | 3 |
+| 5. Local v1 | Focused recovery checks and a reproducible installation. | 4 |
 
-The [architecture](architecture.md) assigns component responsibilities. The [contracts](contracts.md) define the models and behavior each phase implements.
+The [architecture](architecture.md) assigns responsibilities. The [adversarial review](adversarial-review.md) explains why this sequence favors a working loop early.
 
-## Phase 0 Integration feasibility
+## Phase 0 Small integration loop
 
-**Goal:** remove uncertainty in the two third-party boundaries before building the application around them.
-
-**Work:**
-
-- Start the actual Codex app-server, initialize a thread, stream a turn, and bind a canvas tool to local handlers.
-- Exercise a native execution approval, both acceptance and denial, cancellation, and thread resume after restarting the application connection.
-- Embed Excalidraw; read selection and elements; add an editable agent annotation.
-- Render a saved board region containing text and a pasted image through a local worker without the editing browser.
-- Verify image input or image tool-result delivery reaches the model.
-- Record the tested CLI/editor versions, authentication path, provider capability matrix, and concrete tool transport.
-
-**Exit gate:** a small real vertical slice demonstrates structured board read, regional image understanding, and an editable response, plus working approval and resume behavior. Record unsupported optional behavior, such as steering, with its explicit fallback. If a required capability fails, revise the integration choice before phase 1.
-
-**Output:** short integration decision record and disposable spike. A connection to this hosted chat is not assumed.
-
-## Phase 1 Models and durable state
-
-**Goal:** make shared content safe to build on.
+**Goal:** prove the actual runtime and editor interaction before investing in infrastructure.
 
 **Work:**
 
-- Define runtime-validated schemas for projects, sessions, turns, messages, board snapshots, element metadata, mutations, managed files, artifacts, approvals, context deliveries, and events.
-- Add SQLite migrations and managed file storage outside project source files.
-- Implement atomic canvas mutation batches, per-object revisions, tombstones, attribution, and durable idempotency receipts.
-- Separate native scene data from viewport/selection state; preserve source-image bytes and file bindings.
-- Implement snapshot/read APIs, service authentication, and enforcement of one active turn and one editing browser in v1.
+- Start Codex app-server, create a real thread, stream chat, and bind canvas read/write tools to local handlers.
+- Draw in embedded Excalidraw, send "look at the canvas," and have the model inspect structured objects plus a region image exported through the connected browser.
+- Have the agent add editable text or a basic shape. Keep this application as the implementation seed.
+- Test the difficult editor boundary: a pending human drag, an incoming agent annotation, acknowledgment of the drag, then undo. Both participants' changes must survive without echoing edits or applying undo twice.
+- Probe native approval routing and automatic active-turn resource notices. Record the exact runtime/editor versions, authentication path, tool transport, and supported behavior.
 
-**Exit gate:** storage and mutation checks prove round-trip persistence, independent object edits, same-object conflicts, duplicate-request handling, and recovery from an interrupted file/database write. A committed board cannot reference an incompletely written image. Reusing a request ID with different arguments fails.
+**Exit check:** draw → ask Codex → visual inspection → editable annotation appears, using the real runtime. Record the proven update/history strategy and initially restrict agent writes to operations it supports.
 
-**Output:** shared schema module, repository/storage layer, canvas engine, and focused contract tests.
+Automatic mid-run delivery must be demonstrated before claiming it works. If unavailable, make that an explicit limitation of the early slice and revisit the runtime route for phase 3. Do not block the basic drawing loop on independent headless rendering, every lifecycle case, or a complete provider abstraction.
 
-## Phase 2 Ordinary agent harness
+**Output:** a small runnable application and a brief integration decision record.
 
-**Goal:** complete a normal agent task before adding dependence on visual input.
+## Phase 1 Save the working loop
 
-**Work:**
-
-- Build project/session creation and reopening, chat, streamed responses, tool activity, and visible permission requests.
-- Implement the Codex adapter and normalized event mapping using phase 0's verified protocol.
-- Persist native thread/turn references, message checkpoints, approval state, and reconnect cursors.
-- Add cancellation, explicit steering where supported, and a visible queued-message fallback.
-- Reconcile unknown submission/approval outcomes and runtime restarts.
-
-**Exit gate:** use the UI to complete a real repository task, deny an operation, interrupt a turn, reconnect the browser, and continue the same provider thread. Reconnect must not launch duplicate work or silently accept a pending approval.
-
-**Output:** working local harness with ordinary chat, workspace tools, runtime permission controls, and resume.
-
-## Phase 3 Shared canvas and awareness
-
-**Goal:** make the board a persistent resource both participants can use naturally.
+**Goal:** use and reopen the first durable shared experience.
 
 **Work:**
 
-- Add the Excalidraw pane with optimistic local edits, saved-state indicators, and reconciliation against backend acknowledgments.
-- Flush pending edits before a user request captures its board selection.
-- Register read_canvas, capture_region, and apply_canvas_ops through the verified provider tool binding.
-- Supply board identity, bounded overview, selection, revision, and change summary at session start/resume and every user turn.
-- Keep scoped reads and context-delivery receipts distinct.
-- Add attributed agent edits, revision-checked undo, and clear conflict resolution.
+- Add the immediate schemas: project/session identity and runtime binding, board snapshot, image references, object revisions, and mutation request/result.
+- Persist metadata/board state with SQLite and copied image bytes in managed storage.
+- Apply atomic edit batches with stable IDs, per-object revision checks, request receipts, and attribution.
+- Retain pending browser edits when agent changes arrive; surface same-object conflicts.
+- Group agent edits for revision-checked undo. Use phase 0's supported editor operations and expand them only as checks pass.
 
-**Exit gate:** the agent can discover the board without a special attachment, inspect a selected drawing and screenshot, and add editable notes. Human edits to another object survive an agent batch; same-object races conflict explicitly. Undo cannot erase a later edit. Drawing alone does not start agent tasks.
+**Exit check:** draw → ask → editable agent result → close/reopen with the board, images, and session association intact. Independent edits survive, same-object conflicts are explicit, repeated requests do not duplicate annotations, and undo does not erase later changes.
 
-**Output:** shared canvas usable within a normal conversation, with durable edits and safe interaction.
+**Output:** the first personal-use slice. Source images and basic edit correctness are included from this point.
 
-## Phase 4 Complete project workflow
+## Phase 2 Ordinary session lifecycle
 
-**Goal:** connect visual communication to actual work and durable outputs.
-
-**Work:**
-
-- Implement source-image import, artifact registration, and attach_artifact.
-- Copy published file bytes into managed storage and add native image previews or labeled links to the board.
-- Keep chat-to-board references navigable; show meaningful status for deleted targets and unavailable files.
-- Allow the agent to annotate progress and results beside the originating sketch.
-- Carry a user's revised selection into a subsequent request or explicit active-run update.
-
-**Exit gate:** demonstrate sketch or screenshot → user request → normal agent tools and project changes → editable explanation and output preview on the same board → user correction → continued agent work. Close and reopen the app; verify conversation linkage, board content, images, and artifacts.
-
-**Output:** the full product loop, ready for release verification.
-
-## Phase 5 Recovery and local release
-
-**Goal:** make the integrated loop dependable on a fresh local installation.
+**Goal:** grow the same application into a comfortable normal agent harness.
 
 **Work:**
 
-- Exercise service and runtime crashes, browser reconnects, interrupted uploads, unavailable render workers, duplicate requests/events, stale edits, expired approvals, and unknown submissions.
-- Validate bounded context/pagination, old-session reopening against a changed board, and explicit resynchronization after compacted history.
-- Verify retained undo history and artifact references prevent premature file cleanup.
-- Add setup, runtime prerequisites, supported version/capability matrix, storage/backup instructions, and recovery guidance.
-- Run a clean-install smoke workflow and document the local single-editor limits.
+- Add session creation/reopening, tool activity, visible native approvals, cancellation, and provider-thread resume.
+- Add turn/message/approval records and UI checkpoints as these features need them.
+- Add explicit active-run instructions and a visible queued-message fallback.
+- Reconcile uncertain submissions and runtime disconnects without blindly replaying work.
+- Add bounded application events for UI reconnect; avoid building a general event-sourcing system.
 
-**Exit gate:** the phase 4 workflow succeeds from a fresh installation; focused lifecycle and concurrency checks pass; no successful save loses board content or image/artifact references. The UI distinguishes unsaved, saved, conflicted, disconnected, and uncertain runtime state.
+**Exit check:** complete a real project task, deny an operation, interrupt a turn, reconnect, and continue the same provider thread. Reconnect does not launch duplicate tasks or silently accept approvals.
 
-**Output:** first usable local release. Application implementation begins only after the planning stage.
+**Output:** normal agent workflow alongside the working canvas.
+
+## Phase 3 Awareness and live notices
+
+**Goal:** make the board naturally available throughout the session.
+
+**Work:**
+
+- Supply board identity, bounded overview, selection, and change summaries at session start/resume and each turn.
+- Flush drawing edits before recording a user message's reference. Rebuild current context when a queued message dispatches.
+- Coalesce committed human edits during a run into a bounded, debounced canvas_changed notice for the expected active turn.
+- Skip agent-authored edits, retain undelivered changes, and avoid starting new turns for idle drawing.
+- Add "Ask about selection" and explicit "Send update" conveniences over the normal message flow.
+- Track delivery revisions without treating scoped reads or notices as proof the model saw the entire board.
+
+**Exit check:** while Codex works, edit the board and demonstrate a notice reaching the active turn at a supported boundary. The agent can read the changed objects and draw back. Its own drawing causes no notice loop. A queued request gets current state and reports deleted targets.
+
+If live notices remain unsupported, state that visibly and revisit the integration decision; next-turn refresh is not labeled live collaboration.
+
+**Output:** verified canvas awareness and active-turn updates.
+
+## Phase 4 Generated outputs on the board
+
+**Goal:** connect ordinary project work to persistent visual results.
+
+**Work:**
+
+- Expose publish_artifact(requestId, sourcePath, title), copying a permitted workspace file into managed storage and returning its artifact ID.
+- Expose attach_artifact to place a native image preview or labeled reference on the board.
+- Link chat messages to relevant board objects, and show useful states for deleted objects or unavailable files.
+- Support agent annotations beside the originating sketch and continued work from user corrections.
+
+**Exit check:** sketch or screenshot → user request → normal tools/project changes → published output and editable explanation on the board → user correction → continued work. Reopen and verify images and artifacts still resolve.
+
+**Output:** complete visual communication and artifact loop.
+
+## Phase 5 Local v1
+
+**Goal:** make the implemented path dependable enough for regular personal use.
+
+**Work:**
+
+- Check browser reconnect, runtime failure, repeated commands, stale edits, denial/expired approvals, and an interrupted image import.
+- Verify saved board/image/artifact references survive restart and that uncertain runtime outcomes remain visible.
+- Document setup, supported versions/capabilities, data location, backup, and the single-editor limitation.
+- Retain managed files initially; defer automatic cleanup and broad historical retention.
+- Run the full workflow on a fresh installation.
+
+**Exit check:** the implemented workflow passes focused integration checks; save state, conflicts, and runtime failures are visible. No successfully acknowledged board references incompletely stored image bytes.
+
+**Output:** local v1, grown from the initial runnable slice.
 
 ## After v1
 
-Add an MCP interface over the existing canvas handlers, then validate another provider adapter. Portable board/artifact export, richer previews, simultaneous agents, human multiplayer, and hosted deployment are separate follow-up scopes.
+Consider browser-independent rendering, an MCP interface for external clients, another provider adapter, portable export, richer previews, multiplayer, and hosted deployment when they solve an observed need. General history pagination and cleanup automation can follow growing data volumes.
 
-Do not require those extensions to validate the local Codex-backed shared-canvas experience.
+Keep authoritative board state, atomic mutations, object revision checks, durable images, and safe undo throughout. Those protect actual work; they do not require a production platform before the first demo.
