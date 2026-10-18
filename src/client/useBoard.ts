@@ -39,14 +39,18 @@ export function useBoard(notify: (message: string) => void) {
   const saveTimer = useRef<ReturnType<typeof setTimeout>>();
   const flushRef = useRef<() => Promise<boolean>>(async () => true);
   const conflicted = useRef(false);
+  const pointerActive = useRef(false);
+  const clearHistoryAfterGesture = useRef(false);
 
   const renderMerged = useCallback(() => {
-    if (!canonical.current) return;
-    elements.current = mergeElements(canonical.current, pending.current);
+    if (!canonical.current || pointerActive.current) return;
+    const rendered = structuredClone(mergeElements(canonical.current, pending.current));
+    // Excalidraw mutates native elements in place; keep a separate comparison snapshot.
+    elements.current = structuredClone(rendered);
     setElementCount(elements.current.filter(element => !element.isDeleted).length);
     files.current = { ...canonical.current.files, ...files.current };
     editor.current?.addFiles(Object.values(files.current));
-    editor.current?.updateScene({ elements: elements.current, captureUpdate: CaptureUpdateAction.NEVER });
+    editor.current?.updateScene({ elements: rendered, captureUpdate: CaptureUpdateAction.NEVER });
   }, []);
 
   const receiveBoard = useCallback((incoming: Board, mutation?: MutationInfo) => {
@@ -62,14 +66,15 @@ export function useBoard(notify: (message: string) => void) {
         edit.expectedRevision = incoming.metadata[id]?.revision;
       }
     }
-    canonical.current = { ...incoming, files: incoming.files || {}, metadata: incoming.metadata || {} };
+    canonical.current = structuredClone({ ...incoming, files: incoming.files || {}, metadata: incoming.metadata || {} });
     files.current = { ...incoming.files, ...files.current };
     setBoard(canonical.current);
     if (mutation?.actor === "agent") setAgentMutation(mutation.id);
     if (mutation?.actor === "undo") setAgentMutation(undefined);
     if (previous && incoming.revision > previous.revision && mutation && mutation.actor !== "human") {
       // Native history has no revision guards. The shared undo endpoint does.
-      editor.current?.history.clear();
+      if (pointerActive.current) clearHistoryAfterGesture.current = true;
+      else editor.current?.history.clear();
     }
     renderMerged();
     if (!pending.current.size && !saving.current) {
@@ -103,6 +108,7 @@ export function useBoard(notify: (message: string) => void) {
         const operations = [...edits].map(([elementId, edit]) => {
           if (edit.element.isDeleted) return { kind: "delete", elementId, expectedRevision: edit.expectedRevision };
           if (edit.expectedRevision === undefined) return { kind: "create", elementId, element: edit.element };
+          if (canonical.current?.elements.find(element => element.id === elementId)?.isDeleted) return { kind: "restore", elementId, expectedRevision: edit.expectedRevision, patch: { ...edit.element, isDeleted: false } };
           return { kind: "update", elementId, expectedRevision: edit.expectedRevision, patch: edit.element };
         });
         const result = await api<MutationResult>("/api/board/mutate", { requestId: crypto.randomUUID(), observedBoardRevision: current.revision, operations });
@@ -146,16 +152,22 @@ export function useBoard(notify: (message: string) => void) {
     setSelectedIds(previous => previous.join("|") === ids.join("|") ? previous : ids);
     if (!canonical.current) return;
     files.current = { ...files.current, ...nextFiles };
-    elements.current = [...next];
+    const previous = new Map(elements.current.map(element => [element.id, element]));
+    elements.current = structuredClone([...next]);
     setElementCount(next.filter(element => !element.isDeleted).length);
     const saved = new Map(canonical.current.elements.map(element => [element.id, element]));
     const nextIds = new Set(next.map(element => element.id));
-    const updated = new Map<string, PendingEdit>();
+    const updated = new Map(pending.current);
     for (const element of next) {
-      if (!equivalent(element, saved.get(element.id))) updated.set(element.id, { element, expectedRevision: pending.current.get(element.id)?.expectedRevision ?? canonical.current.metadata[element.id]?.revision });
+      if (equivalent(element, previous.get(element.id))) continue;
+      if (!equivalent(element, saved.get(element.id))) updated.set(element.id, { element: structuredClone(element), expectedRevision: pending.current.get(element.id)?.expectedRevision ?? canonical.current.metadata[element.id]?.revision });
+      else updated.delete(element.id);
     }
-    for (const element of canonical.current.elements) {
-      if (!element.isDeleted && !nextIds.has(element.id)) updated.set(element.id, { element: { ...element, isDeleted: true }, expectedRevision: pending.current.get(element.id)?.expectedRevision ?? canonical.current.metadata[element.id]?.revision });
+    for (const element of previous.values()) {
+      if (!element.isDeleted && !nextIds.has(element.id)) {
+        if (!saved.has(element.id)) updated.delete(element.id);
+        else updated.set(element.id, { element: { ...element, isDeleted: true }, expectedRevision: pending.current.get(element.id)?.expectedRevision ?? canonical.current.metadata[element.id]?.revision });
+      }
     }
     pending.current = updated;
     if (!conflicted.current) {
@@ -168,6 +180,15 @@ export function useBoard(notify: (message: string) => void) {
   }, []);
 
   const bindEditor = useCallback((api: any) => { editor.current = api; renderMerged(); }, [renderMerged]);
+  const onPointerDown = useCallback(() => { pointerActive.current = true; }, []);
+  const onPointerUp = useCallback(() => {
+    pointerActive.current = false;
+    // Let Excalidraw publish the completed gesture before reconciling remote edits.
+    setTimeout(() => {
+      if (clearHistoryAfterGesture.current) { editor.current?.history.clear(); clearHistoryAfterGesture.current = false; }
+      renderMerged();
+    }, 0);
+  }, [renderMerged]);
 
   const resolveConflict = useCallback((keepLocal: boolean) => {
     if (!canonical.current) return;
@@ -233,5 +254,5 @@ export function useBoard(notify: (message: string) => void) {
     if (selected.length) editor.current?.scrollToContent(selected, { fitToContent: true, animate: true, maxZoom: 1 });
   }, []);
 
-  return { board, saveStatus, saveError, selectedIds, conflictIds, agentMutation, elementCount, onChange, bindEditor, receiveBoard, flush, resolveConflict, undoAgent, exportBoard, capture, selectElements };
+  return { board, saveStatus, saveError, selectedIds, conflictIds, agentMutation, elementCount, onChange, onPointerDown, onPointerUp, bindEditor, receiveBoard, flush, resolveConflict, undoAgent, exportBoard, capture, selectElements };
 }
