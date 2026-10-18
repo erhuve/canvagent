@@ -1,57 +1,68 @@
 # canvagent
 
-Canvagent is an agent harness with a persistent canvas shared by the user and agent. It combines ordinary chat, workspace tools, execution controls, session history, and progress with a visual workspace both participants can inspect and edit.
+Canvagent is a local Codex harness with a persistent Excalidraw canvas shared by you and your agent. Chat about a project, sketch an idea, drop in a screenshot, and let Codex inspect and annotate the same board while it works.
 
-The agent knows the canvas exists throughout the session. It can understand sketches and screenshots, annotate ideas, explain work, and place artifacts on the same board you use.
+**Status:** the local application is implemented. Real-runtime compatibility and end-to-end release checks are being verified. The adapter currently targets Codex CLI **0.159.2** and its experimental app-server protocol.
 
-**Status:** planning. No application code is implemented yet.
+## Run locally
 
-## Plan
+Use **Node.js 24 or newer** and install [Codex CLI](https://developers.openai.com/codex/cli/) on your `PATH`. Sign in through Codex's normal login flow:
 
-- [Phases of work](docs/roadmap.md): dependencies, deliverables, exit gates, and the v1 release boundary.
-- [Architecture](docs/architecture.md): components, state ownership, runtime integration, and recovery.
-- [Data models and contracts](docs/contracts.md): entities, board operations, canvas context, agent tools, runtime adapter, and UI transport.
-- [Adversarial review](docs/adversarial-review.md): material findings, minimal fixes, and what remains to prove.
-
-## Product experience
-
-Open a project, start or resume a normal agent conversation, and use chat and the canvas together. Sketch a settings screen, select it, and ask the agent to build it. The agent inspects the sketch, performs ordinary project work, and places an annotated screenshot or artifact link near the drawing. Edit the drawing and continue the conversation.
-
-Canvas context is supplied automatically. During an active turn, committed human edits produce batched resource-change notices when the runtime supports them; explicit messages give instructions. Idle drawing stays idle. Canvas use is optional for any particular task.
-
-## Architecture at a glance
-
-```mermaid
-flowchart TB
-    UI["React interface: chat + Excalidraw"]
-    APP["Local Canvagent service"]
-    ADAPTER["Codex adapter"]
-    CODEX["Codex app-server"]
-    STORE["SQLite + managed images and artifacts"]
-
-    UI <-->|"commands and events"| APP
-    APP <--> ADAPTER
-    ADAPTER <-->|"stdio"| CODEX
-    APP <--> STORE
+```sh
+codex login
+npm ci
+npm run build
+npm start -- --workspace /absolute/path/to/your/project
 ```
 
-Canvagent owns the UI, session coordination, canvas awareness, saved board, and artifact references. Codex owns the existing agent execution loop, built-in tools, sandbox, and provider conversation history.
+Open **http://127.0.0.1:4317** and choose **Connect Codex**. Canvagent uses your existing Codex authentication and available models. Keep the browser open when asking the agent to inspect drawings or screenshots: canvas captures render in that browser.
 
-The local service is authoritative for board state. Both the browser and agent submit validated, atomic edits with per-object revision checks. Agent changes are attributed and support safe undo. Excalidraw native scene data remains the saved visual representation.
+To choose the saved-data directory or local port:
 
-The proposed stack is TypeScript, React, Excalidraw, a local Node.js service, SQLite, managed file storage, and a pinned Codex app-server integration. First prove chat → canvas read → editable annotation, then save/reopen that working application. Initially capture images through the connected browser. Add lifecycle, live notices, artifacts, and recovery incrementally.
+```sh
+npm start -- --workspace /absolute/path/to/project --data-dir /absolute/path/to/saved-data --port 4317
+```
 
-## Delivery phases
+Run these commands from the Canvagent checkout. The workspace defaults to the current directory when omitted. The service listens on `127.0.0.1`.
 
-| Phase | Outcome |
-| --- | --- |
-| 0 | Prove chat, visual inspection, and editable agent drawing in one small application. |
-| 1 | Save and reopen that working loop with basic edit correctness. |
-| 2 | Build ordinary chat, tools, approvals, cancellation, and resume. |
-| 3 | Complete automatic awareness, mid-run notices, and editing ergonomics. |
-| 4 | Complete visual feedback and artifact workflows. |
-| 5 | Verify recovery and ship the local v1. |
+## Use the shared canvas
 
-V1 supports one project board, one editing browser, and one active agent turn at a time. Saved sessions can share the project board. Persistence, source images, artifacts, conflict handling, and safe undo are required for the first release.
+- Draw or import an image, then ask Codex about it in chat. Select objects to focus the request.
+- Agent annotations are editable Excalidraw shapes and text. Revision checks protect newer edits, and the interface provides undo for agent changes.
+- Committed canvas changes during a running turn send batched notices through Codex steering. Idle drawing does not start agent work. Notice delivery appears in the activity feed.
+- Use ordinary chat, tool activity, approval controls, stop, conversation history, and model selection alongside the canvas.
+- Ask the agent to publish generated files and attach them to the board. Raster images get previews; other outputs get download links with provenance. Workspace files are never published automatically.
 
-MCP access for external clients, other providers, portable export, human multiplayer, and hosted deployment follow separately. Excalidraw is [MIT licensed](https://github.com/excalidraw/excalidraw/blob/master/LICENSE); agent usage follows the selected provider's authentication and billing.
+One project board is shared across its saved conversations. The current app supports one editing browser and one active agent turn at a time. Codex retains its execution loop, built-in tools, sandbox, authentication, and native conversation history.
+
+## Saved work
+
+The default data location is `~/.local/share/canvagent/<workspace-hash>`, where the hash identifies the absolute workspace path. Startup prints the exact directory. It contains the SQLite database, imported image bytes, and published artifact bytes; editing or removing an original source file does not replace a retained published copy.
+
+Use the same workspace and data directory to reopen saved work. To back it up, stop Canvagent and copy the entire data directory. Codex maintains its own native threads and credentials separately.
+
+## Development
+
+```sh
+npm ci
+CANVAGENT_WORKSPACE=/absolute/path/to/project CANVAGENT_DATA_DIR=/absolute/path/to/dev-data npm run dev
+```
+
+Open **http://127.0.0.1:5173** for the Vite development interface. The local backend uses port 4317. For a single-server run, build and use `npm start` instead.
+
+```sh
+npm run build
+npm test
+```
+
+The automated checks use test runtimes and do not require a Codex login or paid model calls. Node 24 may print its standard experimental warning for the built-in SQLite module.
+
+## Project documents
+
+- [Implementation and runtime status](docs/implementation.md)
+- [Phases of work](docs/roadmap.md)
+- [Architecture](docs/architecture.md)
+- [Data models and contracts](docs/contracts.md)
+- [Adversarial review](docs/adversarial-review.md)
+
+External MCP clients, other agent providers, portable project export, human multiplayer, and hosted deployment remain follow-up work. Excalidraw is [MIT licensed](https://github.com/excalidraw/excalidraw/blob/master/LICENSE); agent usage follows Codex authentication and billing.
