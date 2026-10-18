@@ -4,18 +4,21 @@
   "private": true,
   "type": "module",
   "description": "A local Codex harness with a canvas shared by you and your agent",
-  "engines": { "node": ">=24.0.0" },
+  "engines": {
+    "node": ">=24.0.0"
+  },
   "scripts": {
-    "dev": "concurrently -k -n server,web 'tsx watch src/server/index.ts' 'vite --host 127.0.0.1'",
+    "dev": "concurrently -k -n server,web 'node --import tsx --watch src/server/index.ts' 'vite --host 127.0.0.1'",
     "build": "tsc --noEmit && vite build",
-    "start": "tsx src/server/index.ts",
+    "start": "node --import tsx src/server/index.ts",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test tests/*.test.ts",
+    "test": "node --import tsx --test --test-isolation=none tests/*.test.ts",
     "test:e2e": "playwright test"
   },
   "dependencies": {
     "@excalidraw/excalidraw": "0.18.1",
     "express": "^5.1.0",
+    "image-size": "^2.0.4",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-markdown": "^10.1.0",
