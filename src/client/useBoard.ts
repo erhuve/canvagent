@@ -9,7 +9,8 @@ type MutationInfo = { id: string; actor: string };
 function equivalent(left: SceneElement | undefined, right: SceneElement | undefined) {
   if (!left || left.isDeleted) return !right || !!right.isDeleted;
   if (!right || right.isDeleted) return false;
-  const semantic = (element: SceneElement) => JSON.stringify(element, (key, value) => ["version", "versionNonce", "updated"].includes(key) ? undefined : value);
+  // Excalidraw restores empty bindings as []; that normalization is not a user edit.
+  const semantic = (element: SceneElement) => JSON.stringify({ ...element, boundElements: element.boundElements ?? [] }, (key, value) => ["version", "versionNonce", "updated"].includes(key) ? undefined : value);
   return semantic(left) === semantic(right);
 }
 

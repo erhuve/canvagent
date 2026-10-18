@@ -37,7 +37,7 @@ export function nativeShape(shape: string, input: Record<string, any>, elementId
     fillStyle: 'solid', strokeWidth: 2, strokeStyle: 'solid', roughness: 1, opacity: 100,
     groupIds: [], frameId: null, roundness: shape === 'rectangle' ? { type: 3 } : null,
     seed: randomInt(1, 2 ** 30), version: 1, versionNonce: randomInt(1, 2 ** 30),
-    isDeleted: false, boundElements: null, updated: Date.now(), link: null, locked: false,
+    isDeleted: false, boundElements: [], updated: Date.now(), link: null, locked: false,
     customData: { canvagent: { author: 'agent' } },
   };
   if (shape === 'text') {
