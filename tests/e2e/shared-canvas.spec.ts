@@ -29,6 +29,17 @@ test('a real drawing, browser capture, agent note, live notice and safe undo sha
   await expect(page.getByText('All changes saved', { exact: true })).toBeVisible();
   await page.reload();
   await expect.poll(async () => (await state(page)).board.elements.some((element: any) => element.id === originalId && !element.isDeleted)).toBe(true);
+  // Moving a saved object catches accidental aliasing between Excalidraw and canonical state.
+  const surface = page.locator('.excalidraw canvas.interactive').first();
+  await expect(surface).toBeVisible();
+  const surfaceBounds = (await surface.boundingBox())!;
+  const savedRectangle = (await state(page)).board.elements.find((element: any) => element.id === originalId);
+  await page.keyboard.press('v');
+  await page.mouse.move(surfaceBounds.x + savedRectangle.x + savedRectangle.width / 2, surfaceBounds.y + savedRectangle.y + savedRectangle.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(surfaceBounds.x + savedRectangle.x + savedRectangle.width / 2 + 42, surfaceBounds.y + savedRectangle.y + savedRectangle.height / 2 + 27, { steps: 8 });
+  await page.mouse.up();
+  await expect.poll(async () => (await state(page)).board.elements.find((element: any) => element.id === originalId).x).not.toBe(savedRectangle.x);
   await page.getByRole('button', { name: 'Connect Codex', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Codex connected', exact: true })).toBeVisible();
   await page.getByRole('textbox', { name: 'Message Codex' }).fill('Inspect this sketch and add an editable note. Keep working while I draw.');
@@ -62,5 +73,39 @@ test('a real drawing, browser capture, agent note, live notice and safe undo sha
   await page.reload();
   await expect(page.getByText(/I inspected the saved board/)).toBeVisible();
   expect((await state(page)).board.elements.filter((element: any) => !element.isDeleted && element.type === 'rectangle')).toHaveLength(2);
+  // A pending human drag and incoming agent annotation must survive together.
+  await page.getByRole('button', { name: 'New conversation' }).click();
+  await page.getByRole('textbox', { name: 'Message Codex' }).fill('[race] Add a note while I draw. Keep working.');
+  await page.getByRole('button', { name: 'Send message to Codex' }).click();
+  await expect(page.getByText('Race fixture ready: draw now while I prepare an annotation.')).toBeVisible();
+  const beforeRace = await state(page);
+  const raceBounds = (await page.locator('.excalidraw canvas.interactive').first().boundingBox())!;
+  await page.mouse.click(raceBounds.x + 490, raceBounds.y + 290);
+  await page.keyboard.press('r');
+  await page.mouse.move(raceBounds.x + 520, raceBounds.y + 320);
+  await page.mouse.down();
+  let noteArrived = false;
+  for (let step = 0; step < 30; step++) {
+    await page.mouse.move(raceBounds.x + 550 + step * 2, raceBounds.y + 340 + step);
+    await page.waitForTimeout(100);
+    const snapshot = await state(page);
+    if (snapshot.board.elements.some((element: any) => !element.isDeleted && element.text === 'An editable note from Codex')) { noteArrived = true; break; }
+  }
+  expect(noteArrived).toBe(true);
+  await page.mouse.move(raceBounds.x + 670, raceBounds.y + 420, { steps: 8 });
+  await page.mouse.up();
+  await page.keyboard.press('v');
+  await expect.poll(async () => (await state(page)).board.elements.filter((element: any) => !element.isDeleted && element.type === 'rectangle').length).toBe(3);
+  const afterRace = await state(page);
+  const newRectangle = afterRace.board.elements.find((element: any) => !element.isDeleted && element.type === 'rectangle' && !beforeRace.board.elements.some((prior: any) => prior.id === element.id));
+  expect(newRectangle.width).toBeGreaterThan(140);
+  expect(newRectangle.height).toBeGreaterThan(90);
+  expect(afterRace.board.elements.filter((element: any) => !element.isDeleted && element.text === 'An editable note from Codex')).toHaveLength(1);
+  await expect(page.locator('.context-notice')).toContainText('shared with agent');
+  await page.getByRole('button', { name: 'Stop agent' }).click();
+  await expect(page.getByRole('button', { name: 'Stop agent' })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Undo agent edit' }).click();
+  await expect.poll(async () => (await state(page)).board.elements.filter((element: any) => !element.isDeleted && element.text === 'An editable note from Codex').length).toBe(0);
+  expect((await state(page)).board.elements.filter((element: any) => !element.isDeleted && element.type === 'rectangle')).toHaveLength(3);
   expect(errors).toEqual([]);
 });

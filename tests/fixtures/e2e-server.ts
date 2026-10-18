@@ -32,6 +32,10 @@ class BrowserFixtureRuntime {
       const read = textResult(await this.options.onTool('read_canvas', { scope: 'overview' }));
       const capture = await this.options.onTool('capture_region', {});
       if (!capture.success || !capture.contentItems.some((item: any) => item.type === 'inputImage' && item.imageUrl?.startsWith('data:image/png;base64,'))) throw new Error('The real browser did not return a canvas PNG.');
+      if (text.includes('[race]')) {
+        this.options.onEvent({ type: 'item/agentMessage/delta', payload: { threadId: this.threadId, turnId, itemId: `ready-${turnId}`, delta: 'Race fixture ready: draw now while I prepare an annotation.' } });
+        await new Promise(resolve => setTimeout(resolve, 1200));
+      }
       const original = read.elements.find((element: any) => element.type === 'rectangle');
       textResult(await this.options.onTool('apply_canvas_ops', { requestId: `fixture-note-${turnId}`, observedBoardRevision: read.revision,
         operations: [{ kind: 'create', elementId: `agent-note-${turnId}`, shape: 'text', text: 'An editable note from Codex', x: original ? original.x + original.width + 30 : 260, y: original?.y ?? 180, fontSize: 20 }] }));
