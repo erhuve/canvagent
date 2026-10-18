@@ -46,12 +46,12 @@ class FakeRuntime {
   }
 }
 
-async function fixture(t: TestContext) {
+async function fixture(t: TestContext, customize: (runtime: FakeRuntime) => void = () => {}) {
   const directory = mkdtempSync(join(tmpdir(), 'canvagent-app-'));
   const workspace = join(directory, 'workspace'); mkdirSync(workspace);
   const runtimes: FakeRuntime[] = [];
   const options = { workspace, dataDir: join(directory, 'data'), port: 0,
-    runtimeFactory: (configuration: RuntimeOptions) => { const runtime = new FakeRuntime(configuration); runtimes.push(runtime); return runtime as any; } };
+    runtimeFactory: (configuration: RuntimeOptions) => { const runtime = new FakeRuntime(configuration); customize(runtime); runtimes.push(runtime); return runtime as any; } };
   const application = createApplication(options);
   t.after(async () => { await application.close(); rmSync(directory, { recursive: true, force: true }); });
   await new Promise<void>((resolveListen, reject) => {
@@ -256,4 +256,41 @@ test('agent publishes durable outputs and receives an explicit unavailable captu
   assert.equal(unavailable.success, false);
   assert.match(toolText(unavailable).error, /RESOURCE_UNAVAILABLE/);
   assert.equal((await f.request(`/api/artifacts/${artifact.id}`, undefined, {}, false)).response.status, 401);
+});
+
+test('authorization failure updates the visible runtime state for a fresh login', async t => {
+  const f = await fixture(t);
+  await f.message('needs-login');
+  const runtime = f.runtimes[0];
+  runtime.options.onEvent({ type: 'error', payload: { threadId: runtime.threadId,
+    error: { message: 'Please sign in again.', codexErrorInfo: 'unauthorized' } } });
+  runtime.complete('failed');
+  assert.equal(f.application.state().runtime.authenticated, false);
+  assert.equal(f.application.state().runtime.error, 'Please sign in again.');
+  assert.equal(f.application.state().sessions[0].status, 'failed');
+});
+
+test('queued dispatch waits for a late start acknowledgment after terminal completion', async t => {
+  let acceptStart: (() => void) | undefined;
+  const f = await fixture(t, runtime => {
+    const start = runtime.start.bind(runtime);
+    runtime.start = async (text, requestId) => {
+      const turnId = await start(text, requestId);
+      if (requestId === 'slow-start') await new Promise<void>(resolveStart => { acceptStart = resolveStart; });
+      return turnId;
+    };
+  });
+  const first = f.message('slow-start');
+  await waitFor(() => !!acceptStart);
+  const runtime = f.runtimes[0];
+  runtime.approval(700);
+  await f.message('queued-followup', 'Continue with the latest canvas');
+  assert.equal(f.application.state().sessions[0].queued.length, 1);
+  runtime.complete();
+  await delay(30);
+  assert.equal(runtime.starts.length, 1);
+  acceptStart!();
+  await first;
+  await waitFor(() => runtime.starts.length === 2);
+  assert.equal(f.application.state().sessions[0].status, 'running');
 });

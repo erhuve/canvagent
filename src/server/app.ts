@@ -57,6 +57,7 @@ export function createApplication(options: ApplicationOptions) {
   let noticeDeliveryBlocked = false;
   let pendingNotice: { sinceRevision: number; throughRevision: number; ids: Set<string>; deleted: Set<string> } | undefined;
   let lastBroadcastRevision = store.board().revision;
+  let dispatchTail: Promise<void> = Promise.resolve();
 
   for (const session of sessions) {
     session.activities ??= [];
@@ -73,6 +74,7 @@ export function createApplication(options: ApplicationOptions) {
     for (const socket of sockets) if (socket.readyState === WebSocket.OPEN) socket.send(data);
   }
   function sessionChanged(session: Session) { persist(); emit({ type: 'session', session }); }
+  function boardSnapshot() { return { ...store.board(), lastAgentMutation: store.get<string>('lastAgentMutation') ?? null }; }
   function runtimeChanged() { emit({ type: 'runtime', runtime: runtimeState }); }
   function findSession(id: string) {
     const session = sessions.find(s => s.id === id);
@@ -87,7 +89,7 @@ export function createApplication(options: ApplicationOptions) {
   if (!sessions.length) newSession();
   function state() { return {
     project: { name: workspace.split('/').filter(Boolean).at(-1) ?? 'Project', workspace },
-    board: store.board(), sessions, activeSessionId, runtime: runtimeState,
+    board: boardSnapshot(), sessions, activeSessionId, runtime: runtimeState,
     artifacts: store.get<Artifact[]>('artifacts') ?? [],
   }; }
   function recordActivity(session: Session, id: string, kind: string, title: string, status: string, detail?: string) {
@@ -100,8 +102,9 @@ export function createApplication(options: ApplicationOptions) {
 
   function boardChanged(result: MutationResult, actor: string) {
     if (!result.ok) return;
-    const board = store.board();
     if (result.boardRevision <= lastBroadcastRevision) return;
+    if (actor === 'agent') store.set('lastAgentMutation', result.mutationId);
+    const board = boardSnapshot();
     lastBroadcastRevision = board.revision;
     emit({ type: 'board', board, mutation: { id: result.mutationId, actor } });
     if (!['human', 'undo'].includes(actor) || !busySessionId) return;
@@ -210,6 +213,9 @@ export function createApplication(options: ApplicationOptions) {
       return;
     } else if (event.type === 'error' || event.type === 'runtime.error') {
       const text = p.error?.message ?? p.message ?? 'Runtime error';
+      if (p.error?.codexErrorInfo === 'unauthorized') {
+        runtimeState.authenticated = false; runtimeState.error = text; runtimeChanged();
+      }
       recordActivity(session, randomUUID(), 'runtime', text, 'failed');
     } else return;
     sessionChanged(session);
@@ -257,7 +263,11 @@ export function createApplication(options: ApplicationOptions) {
   function failTurn(session: Session, error: any) {
     session.status = error?.uncertain ? 'unknown' : 'failed';
     if (busySessionId === session.id) busySessionId = undefined;
-    systemMessage(session, error?.message ?? String(error)); sessionChanged(session);
+    const detail = error?.message ?? String(error);
+    systemMessage(session, /no rollout found/i.test(detail)
+      ? 'Codex could not reopen this conversation. Start a new conversation; your shared canvas is saved.'
+      : detail);
+    sessionChanged(session);
   }
   function context(session: Session, selection: { elementIds: string[] }) {
     const board = store.board();
@@ -269,7 +279,12 @@ export function createApplication(options: ApplicationOptions) {
       overview, totalObjects: live.length, truncated: live.length > 80,
       instruction: 'Current committed resource state at dispatch. Inspect with read_canvas/capture_region for detail; use service revisions for edits.' };
   }
-  async function dispatch(session: Session, text: string, selection: { elementIds: string[] }, id: string) {
+  function dispatch(session: Session, text: string, selection: { elementIds: string[] }, id: string): Promise<void> {
+    const dispatched = dispatchTail.then(() => beginDispatch(session, text, selection, id));
+    dispatchTail = dispatched.catch(() => {});
+    return dispatched;
+  }
+  async function beginDispatch(session: Session, text: string, selection: { elementIds: string[] }, id: string) {
     if (busySessionId) throw Object.assign(new Error('Another agent turn is running.'), { status: 409 });
     busySessionId = session.id; session.status = 'starting'; sessionChanged(session);
     await connectRuntime();
@@ -383,7 +398,11 @@ export function createApplication(options: ApplicationOptions) {
   });
   app.post('/api/board/undo', (req, res) => {
     const input = z.object({ mutationId: z.string().min(1), requestId }).parse(req.body);
-    const result = store.undo(input.mutationId, input.requestId, 'human'); if (result.ok) boardChanged(result, 'undo');
+    const result = store.undo(input.mutationId, input.requestId, 'human');
+    if (result.ok) {
+      if (store.get<string>('lastAgentMutation') === input.mutationId) store.set('lastAgentMutation', null);
+      boardChanged(result, 'undo');
+    }
     res.status(result.ok ? 200 : 409).json(result);
   });
   app.post('/api/capture-result', (req, res) => {
