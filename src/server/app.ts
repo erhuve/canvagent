@@ -49,6 +49,7 @@ export function createApplication(options: ApplicationOptions) {
   let noticeTimer: ReturnType<typeof setTimeout> | undefined;
   let noticeSending = false;
   let pendingNotice: { sinceRevision: number; throughRevision: number; ids: Set<string>; deleted: Set<string> } | undefined;
+  let lastBroadcastRevision = store.board().revision;
 
   for (const session of sessions) {
     session.activities ??= [];
@@ -93,9 +94,8 @@ export function createApplication(options: ApplicationOptions) {
   function boardChanged(result: MutationResult, actor: string) {
     if (!result.ok) return;
     const board = store.board();
-    const seen = store.get<number>('lastBroadcastRevision') ?? -1;
-    if (board.revision <= seen) return;
-    store.set('lastBroadcastRevision', board.revision);
+    if (result.boardRevision <= lastBroadcastRevision) return;
+    lastBroadcastRevision = board.revision;
     emit({ type: 'board', board, mutation: { id: result.mutationId, actor } });
     if (!['human', 'undo'].includes(actor) || !busySessionId) return;
     const previous = pendingNotice;
@@ -199,7 +199,7 @@ export function createApplication(options: ApplicationOptions) {
     sessionChanged(session);
   }
   async function connectRuntime() {
-    if (runtimeState.connected && runtime) return;
+    if (runtimeState.connected && runtimeState.authenticated && runtime) return;
     if (connecting) return connecting;
     runtime?.close();
     runtime = (options.runtimeFactory ?? (configuration => new CodexRuntime(configuration)))({
@@ -258,6 +258,12 @@ export function createApplication(options: ApplicationOptions) {
     await connectRuntime();
     const thread = await runtime!.open(session.threadId ?? undefined);
     session.threadId = thread;
+    if (runtime!.activeTurnId) {
+      session.turnId = runtime!.activeTurnId; session.status = 'running';
+      session.queued.push({ id, text, selection });
+      systemMessage(session, 'Resumed an existing active turn. Your message is queued until it finishes.');
+      sessionChanged(session); return;
+    }
     const canvasContext = context(session, selection);
     const nativeTurnId = await runtime!.start(`${text}\n\n[Canvagent canvas resource context]\n${JSON.stringify(canvasContext)}`, id);
     session.contextRevision = canvasContext.revision;
@@ -274,7 +280,7 @@ export function createApplication(options: ApplicationOptions) {
   };
   const authenticated = (cookie: string | undefined) => {
     const candidate = cookie?.split(';').map(s => s.trim()).find(s => s.startsWith('canvagent='))?.slice('canvagent='.length);
-    return !!candidate && candidate.length === token.length && timingSafeEqual(Buffer.from(candidate), Buffer.from(token));
+    return !!candidate && /^[a-f0-9]{64}$/.test(candidate) && timingSafeEqual(Buffer.from(candidate, 'hex'), Buffer.from(token, 'hex'));
   };
   app.disable('x-powered-by');
   app.use((req, res, next) => {
@@ -375,6 +381,8 @@ export function createApplication(options: ApplicationOptions) {
     res.send(bytes);
   });
   app.get('/api/*path', (_req, res) => res.status(404).json({ error: 'API route not found.' }));
+  const applicationRoot = resolve(import.meta.dirname, '../..');
+  app.use('/excalidraw-assets', express.static(join(applicationRoot, 'node_modules', '@excalidraw', 'excalidraw', 'dist', 'prod'), { maxAge: '1y', immutable: true }));
   const dist = options.distDir ?? resolve('dist');
   if (existsSync(join(dist, 'index.html'))) { app.use(express.static(dist)); app.get('/{*path}', (_req, res) => res.sendFile(join(dist, 'index.html'))); }
   app.use((error: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {

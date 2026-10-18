@@ -6,7 +6,10 @@ export default defineConfig({
   server: {
     port: 5173,
     strictPort: true,
-    proxy: { '/api': { target: 'http://127.0.0.1:4317', ws: true } },
+    proxy: {
+      '/api': { target: 'http://127.0.0.1:4317', ws: true },
+      '/excalidraw-assets': { target: 'http://127.0.0.1:4317' },
+    },
   },
   build: { outDir: 'dist', sourcemap: true },
 });
