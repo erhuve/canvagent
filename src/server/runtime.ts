@@ -1,5 +1,6 @@
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createInterface, type Interface } from "node:readline";
+import { canvasServerName, canvasTokenEnvironment } from './canvas-mcp.js';
 
 export type RpcId = string | number;
 export type RuntimeEvent = { type: string; payload: any };
@@ -12,6 +13,9 @@ export interface RuntimeOptions {
   model?: string;
   tools?: CanvasTool[];
   developerInstructions?: string;
+  /** Per-conversation local MCP endpoint. Unlike persisted dynamic tools, this
+   * connection can discover the current catalogue when a thread is resumed. */
+  canvasMcp?: { url: () => string; token: string };
   onEvent: (event: RuntimeEvent) => void;
   onTool: (name: string, args: any) => Promise<ToolResult>;
   onApproval: (request: ApprovalRequest) => void;
@@ -67,6 +71,7 @@ export class CodexRuntime {
   private uncertainSubmission = false;
   private intentionalClose = false;
   private generation = 0;
+  private canvasToolsReady = false;
 
   constructor(private readonly options: RuntimeOptions) {}
 
@@ -79,7 +84,7 @@ export class CodexRuntime {
       cwd: this.options.cwd,
       stdio: ["pipe", "pipe", "pipe"],
       // Inherit the runtime's configured authentication; never read credential files here.
-      env: process.env,
+      env: { ...process.env, ...(this.options.canvasMcp ? { [canvasTokenEnvironment]: this.options.canvasMcp.token } : {}) },
     });
     this.child = child;
     this.lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
@@ -140,6 +145,7 @@ export class CodexRuntime {
     this.requireConnected();
     if (this.opening || this.starting || this.activeTurnId) throw new Error("Cannot switch threads while a turn or session operation is active");
     this.opening = true;
+    this.canvasToolsReady = false;
     try {
       const common = {
         cwd: this.options.cwd,
@@ -147,17 +153,29 @@ export class CodexRuntime {
         approvalPolicy: "on-request",
         sandbox: "workspace-write",
         ...(this.options.developerInstructions ? { developerInstructions: this.options.developerInstructions } : {}),
+        ...(this.options.canvasMcp ? { config: { [`mcp_servers.${canvasServerName}`]: {
+          url: this.options.canvasMcp.url(), bearer_token_env_var: canvasTokenEnvironment,
+          required: true, startup_timeout_sec: 10, tool_timeout_sec: 30,
+        } } } : {}),
       };
       const response = threadId
         ? await this.request("thread/resume", { ...common, threadId })
         : await this.request("thread/start", {
             ...common,
             // Experimental in 0.159.2; these are native dynamic tools, not MCP names.
-            dynamicTools: (this.options.tools ?? []).map((tool) => ({ type: "function", ...tool })),
+            ...(!this.options.canvasMcp ? { dynamicTools: (this.options.tools ?? []).map((tool) => ({ type: "function", ...tool })) } : {}),
           });
       if (typeof response.thread?.id !== "string") throw new Error("Codex returned a thread without an ID");
+      if (threadId && response.thread.id !== threadId) throw new Error('Codex returned a different conversation while resuming; the saved binding was retained.');
       this.threadId = response.thread.id;
       this.activeTurnId = response.thread.turns?.find((turn: any) => turn.status === "inProgress")?.id ?? null;
+      if (this.options.canvasMcp) {
+        const inventory = await this.request('mcpServerStatus/list', { threadId: this.threadId, serverName: canvasServerName });
+        const server = inventory.data?.find((entry: any) => entry.name === canvasServerName);
+        if (!server || server.toolsError || (this.options.tools ?? []).some(tool => !server.tools?.[tool.name])) throw new Error('The current canvas tools could not be loaded. Your conversation is retained; reconnect and try again.');
+        this.canvasToolsReady = true;
+        this.emit('canvas_tools.ready', { threadId: this.threadId, resumed: Boolean(threadId) });
+      }
       this.uncertainSubmission = false;
       this.emit("thread.opened", { threadId: this.threadId, resumed: Boolean(threadId), activeTurnId: this.activeTurnId });
       return this.threadId!;
@@ -168,6 +186,7 @@ export class CodexRuntime {
 
   async start(text: string, requestId?: string): Promise<string> {
     this.requireThread();
+    if (this.options.canvasMcp && !this.canvasToolsReady) throw new Error('Load the current canvas tools before starting another turn.');
     if (this.opening || this.starting || this.activeTurnId) throw new Error("A Codex turn is already active");
     if (this.uncertainSubmission) throw new Error("The previous submission outcome is unknown; resume the existing thread before sending again");
     this.starting = true;
@@ -323,6 +342,7 @@ export class CodexRuntime {
     if (this.child !== child) return;
     this.child = null;
     this.connected = false;
+    this.canvasToolsReady = false;
     this.connecting = null;
     this.lines?.close();
     this.lines = null;

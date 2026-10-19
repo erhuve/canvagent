@@ -53,7 +53,7 @@ export type Runtime = {
 };
 export type AppState = {
   board: Board;
-  project: { workspace: string; name: string };
+  project: { workspace: string; name: string; desktop?: boolean };
   sessions: Session[];
   activeSessionId?: string;
   runtime: Runtime;

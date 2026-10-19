@@ -28,8 +28,8 @@ test('a real drawing, browser capture, agent note, live notice and safe undo sha
     const response = await fetch('/api/board/mutate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ requestId: crypto.randomUUID(), observedBoardRevision: revision, operations }) });
     if (!response.ok) throw new Error('Could not prepare an empty fixture board.');
   }, { revision: initial.board.revision, operations: existing.map((element: any) => ({ kind: 'delete', elementId: element.id, expectedRevision: initial.board.metadata[element.id].revision })) });
-  if (initial.sessions.some((session: any) => session.messages.length)) await page.getByRole('button', { name: 'New conversation' }).click();
-  await expect(page.getByRole('heading', { name: 'Think it through. Build it together.' })).toBeVisible();
+  if (initial.sessions.some((session: any) => session.messages.length)) await page.getByRole('button', { name: 'New conversation', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'What are we working on?' })).toBeVisible();
   await drawRectangle(page, 290, 190);
   await expect.poll(async () => (await state(page)).board.elements.filter((element: any) => !element.isDeleted && element.type === 'rectangle').length).toBe(1);
   const first = await state(page);
@@ -91,7 +91,10 @@ test('a real drawing, browser capture, agent note, live notice and safe undo sha
   await expect(page.getByText(/I inspected the saved board/)).toBeVisible();
   expect((await state(page)).board.elements.filter((element: any) => !element.isDeleted && element.type === 'rectangle')).toHaveLength(2);
   // A pending human drag and incoming agent annotation must survive together.
-  await page.getByRole('button', { name: 'New conversation' }).click();
+  const previousSessionId = (await state(page)).activeSessionId;
+  await page.getByRole('button', { name: 'New conversation', exact: true }).click();
+  await expect.poll(async () => (await state(page)).activeSessionId).not.toBe(previousSessionId);
+  await expect(page.getByRole('heading', { name: 'What are we working on?' })).toBeVisible();
   await page.getByRole('textbox', { name: 'Message Codex' }).fill('[race] Add a note while I draw. Keep working.');
   await page.getByRole('button', { name: 'Send message to Codex' }).click();
   await expect(page.getByText('Race fixture ready: draw now while I prepare an annotation.')).toBeVisible();

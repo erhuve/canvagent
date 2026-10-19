@@ -33,6 +33,9 @@ createInterface({input:process.stdin}).on('line', line => {
   case 'thread/resume':
    send({method:'test/resume-params',params:request.params});
    reply(request,{thread:{id:request.params.threadId,turns:active?[turn()]:[]}}); break;
+  case 'mcpServerStatus/list':
+   send({method:'test/mcp-status-params',params:request.params});
+   reply(request,{data:[{name:'canvagent_canvas',tools:{read_canvas:{name:'read_canvas'}},toolsError:null}],nextCursor:null}); break;
   case 'turn/start': {
    const text=request.params.input[0].text;
    send({method:'test/start-params',params:request.params});
@@ -120,6 +123,50 @@ test("steering targets the existing turn and interruption waits for its terminal
   assert.equal(runtime.activeTurnId, id);
   await waitFor(events, "turn/completed");
   assert.equal(runtime.activeTurnId, null);
+});
+
+test('resuming an existing thread installs current canvas MCP tools without replacing native history', async t => {
+  const { runtime, events } = fixture({ canvasMcp: { url: () => 'http://127.0.0.1:4317/mcp/saved-conversation', token: 'local-test-token' } });
+  t.after(() => runtime.close());
+  await runtime.connect();
+  const savedThread = 'existing-native-thread';
+  assert.equal(await runtime.open(savedThread), savedThread);
+  const params = (await waitFor(events, 'test/resume-params')).payload;
+  assert.equal(params.threadId, savedThread);
+  assert.equal(params.history, undefined);
+  assert.equal(params.dynamicTools, undefined);
+  assert.deepEqual(params.config['mcp_servers.canvagent_canvas'], {
+    url: 'http://127.0.0.1:4317/mcp/saved-conversation', bearer_token_env_var: 'CANVAGENT_CANVAS_MCP_TOKEN', required: true, startup_timeout_sec: 10, tool_timeout_sec: 30,
+  });
+  assert.equal(JSON.stringify(params).includes('local-test-token'), false);
+  assert.equal(events.some(event => event.type === 'test/thread-params'), false);
+  assert.equal((await waitFor(events, 'test/mcp-status-params')).payload.threadId, savedThread);
+  assert.deepEqual((await waitFor(events, 'canvas_tools.ready')).payload, { threadId: savedThread, resumed: true });
+  await runtime.start('Continue our existing work');
+  assert.equal((await waitFor(events, 'test/start-params')).payload.threadId, savedThread);
+});
+
+test('new threads use the refreshable canvas connection and verify its tools before starting work', async t => {
+  const { runtime, events } = fixture({ canvasMcp: { url: () => 'http://127.0.0.1:4317/mcp/new-conversation', token: 'token' } });
+  t.after(() => runtime.close());
+  await runtime.connect();
+  await runtime.open();
+  const params = (await waitFor(events, 'test/thread-params')).payload;
+  assert.equal(params.dynamicTools, undefined);
+  assert.equal(params.config['mcp_servers.canvagent_canvas'].url, 'http://127.0.0.1:4317/mcp/new-conversation');
+  assert.deepEqual((await waitFor(events, 'canvas_tools.ready')).payload, { threadId: 'thread-1', resumed: false });
+});
+
+test('missing upgraded tools retain the old thread binding and do not silently start a replacement', async t => {
+  const { runtime, events } = fixture({ canvasMcp: { url: () => 'http://127.0.0.1:4317/mcp/existing', token: 'token' },
+    tools: [{ name: 'apply_canvas_ops', description: 'Current drawing tools', inputSchema: { type: 'object' } }],
+  });
+  t.after(() => runtime.close());
+  await runtime.connect();
+  await assert.rejects(runtime.open('original-thread'), /current canvas tools could not be loaded/);
+  assert.equal(runtime.threadId, 'original-thread');
+  await assert.rejects(runtime.start('Do not continue without tools'), /current canvas tools/);
+  assert.equal(events.some(event => event.type === 'test/thread-params' || event.type === 'test/start-params'), false);
 });
 
 test("canvas tool responses preserve native text and image output", async (t) => {

@@ -19,7 +19,7 @@ test('a distant object does not change regional pixels and a huge blank capture 
       if (!response.ok) throw new Error('Could not prepare an empty fixture board.');
     }, { revision: initial.board.revision, operations: live.map((element: any) => ({ kind: 'delete', elementId: element.id, expectedRevision: initial.board.metadata[element.id].revision })) });
   }
-  await page.getByRole('button', { name: 'New conversation' }).click();
+  await page.getByRole('button', { name: 'New conversation', exact: true }).click();
   const surface = (await page.locator('.excalidraw canvas.interactive').boundingBox())!;
   await page.mouse.click(surface.x + 260, surface.y + 190);
   await page.keyboard.press('r');

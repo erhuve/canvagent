@@ -6,6 +6,8 @@ import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { test, type TestContext } from 'node:test';
 import { createApplication } from '../src/server/app.ts';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { RuntimeOptions } from '../src/server/runtime.ts';
 
 class FakeRuntime {
@@ -89,6 +91,12 @@ async function waitFor(predicate: () => boolean, timeout = 2500) {
 }
 function context(text: string) { return JSON.parse(text.split('[Canvagent canvas resource context]\n')[1]); }
 function toolText(result: any) { return JSON.parse(result.contentItems.find((item: any) => item.type === 'inputText').text); }
+async function canvasClient(t: TestContext, url: string, token: string) {
+  const client = new Client({ name: 'canvagent-test', version: '1.0.0' });
+  await client.connect(new StreamableHTTPClientTransport(new URL(url), { requestInit: { headers: { Authorization: `Bearer ${token}` } } }));
+  t.after(() => client.close());
+  return client;
+}
 
 test('bootstrap creates a project/session; local origin and cookie protect commands', async t => {
   const f = await fixture(t);
@@ -130,6 +138,77 @@ test('ordinary message gets the current selected board; retry dispatches exactly
   assert.equal(f.application.state().sessions[0].messages.filter(message => message.role === 'user').length, 1);
   assert.equal((await f.message('request-one', 'Different instruction', ['design'])).response.status, 409);
   assert.equal(runtime.starts.length, 1);
+});
+
+test('canvas MCP discovery uses separate credentials and calls are scoped to the active conversation', async t => {
+  const f = await fixture(t);
+  await f.request('/api/runtime/connect', {});
+  const runtime = f.runtimes[0];
+  const token = runtime.options.canvasMcp!.token;
+  const path = `/mcp/${f.sessionId}`;
+  const discovery = { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} };
+  assert.equal((await f.request(path, discovery)).response.status, 401, 'A browser cookie cannot authorize MCP calls.');
+  assert.equal((await f.request(path, discovery, { Authorization: `Bearer ${token}`, Origin: 'https://example.com' })).response.status, 403);
+  assert.equal((await f.request('/api/sessions', {}, { Authorization: `Bearer ${token}` }, false)).response.status, 401, 'The MCP credential cannot authorize browser commands.');
+  const client = await canvasClient(t, `${f.base}${path}`, token);
+  const catalogue = await client.listTools();
+  assert.equal(catalogue.tools.length, 5);
+  const schema = catalogue.tools.find(tool => tool.name === 'apply_canvas_ops')!.inputSchema;
+  assert.ok(JSON.stringify(schema).includes('freedraw'));
+  assert.equal((await client.callTool({ name: 'read_canvas', arguments: {} })).isError, true, 'Idle threads cannot use the endpoint to inspect the board.');
+  await f.message('active-work');
+  const current = await client.callTool({ name: 'read_canvas', arguments: {} });
+  assert.equal(current.isError, false);
+  const other = await f.request('/api/sessions', { title: 'Other conversation' });
+  const otherClient = await canvasClient(t, `${f.base}/mcp/${other.body.id}`, token);
+  assert.equal((await otherClient.callTool({ name: 'read_canvas', arguments: {} })).isError, true);
+  const failedCapture = await client.callTool({ name: 'capture_region', arguments: {} });
+  assert.equal(failedCapture.isError, true);
+  assert.match(JSON.stringify(failedCapture.content), /RESOURCE_UNAVAILABLE/);
+  runtime.complete();
+  assert.equal((await client.callTool({ name: 'read_canvas', arguments: {} })).isError, true, 'Completed turns cannot keep calling tools.');
+});
+
+test('a saved conversation resumes after restart with current drawing tools, original messages and its existing canvas', async t => {
+  const f = await fixture(t);
+  await f.create('human-design');
+  await f.message('previous-request', 'Keep the indigo colour and the asymmetrical layout.');
+  f.runtimes[0].complete();
+  const old = structuredClone(f.application.state());
+  const dataDir = f.application.store.dataDir;
+  await f.application.close();
+  let runtime: FakeRuntime | undefined;
+  const reopened = createApplication({ workspace: f.workspace, dataDir, port: 0,
+    runtimeFactory: options => { runtime = new FakeRuntime(options); return runtime as any; } });
+  let client: Client | undefined;
+  try {
+    await new Promise<void>(resolve => reopened.server.listen(0, '127.0.0.1', resolve));
+    const address = reopened.server.address(); assert.ok(address && typeof address !== 'string');
+    const base = `http://127.0.0.1:${address.port}`;
+    const bootstrap = await fetch(`${base}/api/state`);
+    const cookie = bootstrap.headers.get('set-cookie')!.split(';')[0];
+    const restored = await bootstrap.json() as any;
+    assert.equal(restored.activeSessionId, old.activeSessionId);
+    assert.deepEqual(restored.sessions[0].messages, old.sessions[0].messages);
+    assert.deepEqual(restored.board.elements, old.board.elements);
+    const response = await fetch(`${base}/api/sessions/${f.sessionId}/messages`, { method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ requestId: 'after-upgrade', text: 'Continue the same design with a freehand sketch.' }) });
+    assert.equal(response.status, 202);
+    assert.equal(runtime!.threadId, old.sessions[0].threadId);
+    assert.equal(reopened.state().sessions.length, 1);
+    client = new Client({ name: 'resumed-conversation', version: '1.0.0' });
+    await client.connect(new StreamableHTTPClientTransport(new URL(runtime!.options.canvasMcp!.url()), { requestInit: { headers: { Authorization: `Bearer ${runtime!.options.canvasMcp!.token}` } } }));
+    const draw = await client.callTool({ name: 'apply_canvas_ops', arguments: { requestId: 'resumed-freehand', observedBoardRevision: restored.board.revision,
+      operations: [{ kind: 'create', elementId: 'new-stroke', shape: 'freedraw', x: 250, y: 100, points: [[0, 0], [40, -30], [80, 20], [20, 60]] }] } });
+    assert.equal(draw.isError, false);
+    const state = reopened.state();
+    assert.equal(state.sessions[0].id, f.sessionId);
+    assert.equal(state.sessions[0].threadId, old.sessions[0].threadId);
+    assert.equal(state.sessions[0].messages[0].text, old.sessions[0].messages[0].text);
+    assert.ok(state.board.elements.some(element => element.id === 'human-design'));
+    assert.equal(state.board.elements.find(element => element.id === 'new-stroke')!.type, 'freedraw');
+    assert.equal(state.board.metadata['new-stroke'].actor, `agent:${f.sessionId}`);
+  } finally { await client?.close(); await reopened.close(); }
 });
 
 test('human changes are batched into the active turn; agent edits and idle drawings do not generate notices', async t => {
@@ -234,6 +313,66 @@ test('only an advertised approval decision is sent, and the native request is an
   assert.equal((await f.request(path, { requestId: 'approval-once', decision: 'accept' })).response.status, 409);
   assert.equal(runtime.answers.length, 1);
   assert.equal(f.application.state().sessions[0].status, 'running');
+});
+
+test('Computer Use permission elicitation offers approval and sends an empty accepted form exactly once', async t => {
+  const f = await fixture(t);
+  await f.message('computer-use'); const runtime = f.runtimes[0];
+  runtime.options.onApproval({ id: 0, method: 'mcpServer/elicitation/request', params: {
+    threadId: runtime.threadId, turnId: runtime.activeTurnId, serverName: 'cua_repl', mode: 'form',
+    message: 'Allow Computer Use to use "Google Chrome"?',
+    requestedSchema: { type: 'object', properties: {} },
+    _meta: { codex_approval_kind: 'mcp_tool_call', connector_name: 'Computer Use', persist: ['session', 'always'] },
+  } });
+  const approval = f.application.state().sessions[0].pendingApprovals[0];
+  assert.deepEqual(approval.choices, ['accept', 'decline', 'cancel']);
+  assert.equal(runtime.answers.length, 0);
+  const path = `/api/sessions/${f.sessionId}/approvals/${approval.id}`;
+  assert.equal((await f.request(path, { decision: 'acceptForSession' })).response.status, 400);
+  assert.equal((await f.request(path, { decision: 'accept' })).response.status, 200);
+  assert.deepEqual(runtime.answers, [{ id: 0, result: { action: 'accept', content: {}, _meta: null } }]);
+  assert.equal((await f.request(path, { decision: 'accept' })).response.status, 409);
+  assert.equal(runtime.answers.length, 1);
+  assert.equal(f.application.state().sessions[0].status, 'running');
+});
+
+test('denied and cancelled elicitations do not submit form content', async t => {
+  const f = await fixture(t);
+  await f.message('computer-use'); const runtime = f.runtimes[0];
+  for (const decision of ['decline', 'cancel']) {
+    runtime.options.onApproval({ id: decision, method: 'mcpServer/elicitation/request', params: {
+      threadId: runtime.threadId, mode: 'form', message: 'Allow this app?', requestedSchema: { type: 'object', properties: {}, required: [] },
+    } });
+    const approval = f.application.state().sessions[0].pendingApprovals[0];
+    assert.equal((await f.request(`/api/sessions/${f.sessionId}/approvals/${approval.id}`, { decision })).response.status, 200);
+    assert.deepEqual(runtime.answers.at(-1), { id: decision, result: { action: decision, content: null, _meta: null } });
+  }
+});
+
+test('forms with inputs, unsupported constraints, or verification flows cannot be blindly approved', async t => {
+  const f = await fixture(t);
+  await f.message('forms'); const runtime = f.runtimes[0];
+  const unsupported = [
+    { mode: 'form', requestedSchema: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] } },
+    { mode: 'form', requestedSchema: { type: 'object', properties: {}, required: ['missing'] } },
+    { mode: 'form', requestedSchema: { type: 'object', properties: {}, minProperties: 1 } },
+    { mode: 'form', requestedSchema: { type: 'object', properties: [] } },
+    { mode: 'form', requestedSchema: null },
+    { mode: 'url', url: 'https://example.com/verify', elicitationId: 'verify' },
+    { mode: 'openai/userVerification', challenge: 'verification-required' },
+  ];
+  for (const params of unsupported) {
+    runtime.options.onApproval({ id: 'form', method: 'mcpServer/elicitation/request', params: {
+      ...params, threadId: runtime.threadId, message: 'Provide input', availableDecisions: ['accept', 'decline'],
+    } });
+    const approval = f.application.state().sessions[0].pendingApprovals[0];
+    assert.deepEqual(approval.choices, ['decline', 'cancel']);
+    const path = `/api/sessions/${f.sessionId}/approvals/${approval.id}`;
+    const count = runtime.answers.length;
+    assert.equal((await f.request(path, { decision: 'accept' })).response.status, 400);
+    assert.equal(runtime.answers.length, count);
+    assert.equal((await f.request(path, { decision: 'decline' })).response.status, 200);
+  }
 });
 
 test('agent publishes durable outputs and receives an explicit unavailable capture without a browser', async t => {

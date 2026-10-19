@@ -21,6 +21,12 @@ const paths: Record<string, string> = {
   reconnect: "M20 7a9 9 0 1 0 1 9M20 3v5h-5",
   chat: "M4 4h16v13H9l-5 4Z",
   settings: "M4 7h16M4 17h16M8 4v6m8 4v6",
+  compose: "m16 3 5 5M4 20l4-1 13-13-4-4L4 15Zm9-15H4v16h16v-9",
+  sidebar: "M3 4h18v16H3ZM9 4v16",
+  copy: "M9 9h12v12H9zM15 5V3H3v12h2",
+  info: "M12 16v-4m0-4h.01M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0",
+  down: "M12 4v16m-6-6 6 6 6-6",
+  "arrow-right": "M4 12h16m-6-6 6 6-6 6",
 };
 
 export function Icon({ name, size = 18, style, className }: { name: string; size?: number; style?: CSSProperties; className?: string }) {

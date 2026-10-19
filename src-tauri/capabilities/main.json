@@ -1,0 +1,8 @@
+{
+  "identifier": "desktop-controls",
+  "description": "Workspace selection and graceful shutdown for the main desktop window. The browser has no shell or general filesystem permissions.",
+  "windows": ["main"],
+  "local": true,
+  "remote": { "urls": ["http://127.0.0.1:*"] },
+  "permissions": ["allow-desktop-info", "allow-choose-workspace", "allow-reopen-workspace", "allow-quit-application"]
+}

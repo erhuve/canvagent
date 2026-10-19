@@ -26,13 +26,14 @@ flowchart TB
     RT["Codex app-server subprocess"]
     RW["Browser capture adapter"]
     DB["SQLite and managed files"]
-    MCP["Later: MCP interface"]
+    MCP["Authenticated local canvas MCP"]
 
     UI <-->|"commands and session events"| SC
     EC <-->|"object edits and board events"| CS
     SC <-->|"context and canvas tool calls"| CS
     SC <-->|"messages and normalized events"| RA
     RA <-->|"local stdio protocol"| RT
+    RT <-->|"current tools on start and resume"| MCP
     CS <-->|"render committed snapshot"| RW
     CS <--> DB
     SC <--> DB
@@ -106,7 +107,7 @@ An artifact is an immutable managed file with a stable ID, media type, byte size
 
 Use a small adapter around Codex app-server. The first slice verifies a real thread, streaming, canvas tools, image delivery, and the native approval route. Probe mid-run notice delivery and record what works. Extend cancellation, reconnect, and resume alongside the normal session lifecycle instead of blocking the first drawing demo on all of them. Record the working CLI version and authentication path.
 
-Prefer native client-defined tools when the pinned runtime supports the required contract. If that path cannot serve these tools reliably, a local MCP transport may connect the same handlers to Codex. Tool schemas and board semantics stay the same in either case.
+Supply current canvas tools through an authenticated local MCP connection configured at thread start and resume. This lets saved conversations gain updated schemas while retaining their original native thread and full context. Verify the catalogue before starting a turn. Legacy native dynamic-tool callbacks remain supported for older histories; they use the same handlers, schemas, revision checks and storage. Browser credentials and MCP credentials are separate, and MCP calls require the originating conversation's active turn.
 
 The adapter declares capabilities such as steering and image tool results. Unsupported capabilities have explicit behavior. Canvagent forwards approval decisions against the exact live runtime request; board clicks never implicitly grant command execution permission.
 

@@ -25,15 +25,49 @@ npm start -- --workspace /absolute/path/to/project --data-dir /absolute/path/to/
 
 Run these commands from the Canvagent checkout. The workspace defaults to the current directory when omitted. The service listens on `127.0.0.1`.
 
+## Desktop app (Tauri)
+
+The desktop app opens with a native workspace folder picker and runs the same chat, Excalidraw editor, and Codex backend in a Tauri window. It bundles a standalone Node 24 runtime; installed-app users still need Codex CLI and its normal login, but do not need to install Node separately.
+
+To build or develop it, install the [Tauri platform prerequisites](https://v2.tauri.app/start/prerequisites/) and Rust, then run:
+
+```sh
+npm ci
+npm run desktop:dev
+```
+
+Build a macOS application bundle:
+
+```sh
+npm run desktop:build -- --bundles app
+```
+
+The result is `src-tauri/target/release/bundle/macos/Canvagent.app`, signed ad hoc for local use. Launch it, choose a project folder, and connect Codex. Use **Workspace → Open Workspace…** to change projects; pending canvas edits are saved first, and an active Codex turn asks for confirmation before stopping. Closing the window saves pending edits and shuts down the local service. The launcher remembers the last workspace for the next launch.
+
+The build downloads the official Node archive and checks its SHA-256 against `scripts/node-runtime.json`. Downloaded runtimes, the optional project-local Rust toolchain, and generated desktop resources are ignored by Git. The desktop scripts detect the local toolchain under `.canvagent/toolchain` if one is installed there; otherwise they use your normal Rust installation.
+
+Desktop data is stored in the OS application-data directory under `app.canvagent.desktop/workspaces/<workspace-hash>` (on macOS, under `~/Library/Application Support/`). An existing default CLI database under `~/.local/share/canvagent/<workspace-hash>` is reused when present. Custom browser `--data-dir` locations remain separate.
+
+```sh
+npm run desktop:check
+npm run test:desktop
+```
+
+`desktop:check` builds resources and checks the Rust shell. The desktop tests use the bundled Node binary to verify serving, origin checks, WebSocket delivery, persistence, and parent-process shutdown without model calls. The macOS bundle is for local use; distribution to other Macs requires Apple signing and notarization. Windows and Linux builds need their native Tauri prerequisites and have not yet been validated.
+
 ## Use the shared canvas
 
 - Draw or import an image, then ask Codex about it in chat. Select objects to focus the request.
-- Agent annotations are editable Excalidraw shapes and text. Revision checks protect newer edits, and the interface provides undo for agent changes.
+- The agent can freehand draw arbitrary strokes and custom paths, with pen pressure, colour, thickness, fill, opacity and grouping. Drawings remain native editable Excalidraw elements. Revision checks protect newer edits, and the interface provides undo for agent changes.
 - Committed canvas changes during a running turn send batched notices through Codex steering. Idle drawing does not start agent work. Notice delivery appears in the activity feed.
 - Use ordinary chat, tool activity, approval controls, stop, conversation history, and model selection alongside the canvas.
 - Ask the agent to publish generated files and attach them to the board. Raster images get previews; other outputs get download links with provenance. Workspace files are never published automatically.
 
 One project board is shared across its saved conversations. The current app supports one editing browser and one active agent turn at a time. Codex retains its execution loop, built-in tools, sandbox, authentication, and native conversation history.
+
+Existing conversations receive the current canvas tools automatically when you send the next message after an app upgrade. Canvagent resumes the same native Codex thread and discovers the current tools through its authenticated local canvas connection. Your conversation context, chat history and project canvas stay in place. No new conversation or history summary is needed.
+
+The chat interface uses [assistant-ui](https://github.com/assistant-ui/assistant-ui) for conversations, streamed messages, Markdown, and the composer. It connects to the existing local Codex backend; no Assistant Cloud account or additional model API key is needed. Excalidraw remains the shared canvas.
 
 ## Saved work
 
@@ -56,6 +90,8 @@ npm test
 npx playwright install chromium
 npm run test:e2e
 ```
+
+To check tool upgrades against an installed Codex CLI, run `npm run test:codex-tools` (or set `CANVAGENT_CODEX_BIN` to its executable). This creates and archives a disposable native conversation, uses a local inference stub, restarts the runtime, and verifies that its persisted context and thread ID survive while the latest drawing tools become available. No model inference is performed.
 
 The automated checks use test runtimes and do not require a Codex login or paid model calls. The browser tests exercise real drawing, regional capture, live notices, concurrent edits, reload, and guarded undo. Build before running them; on Linux, Playwright may require `npx playwright install --with-deps chromium`. Node 24 may print its standard experimental warning for the built-in SQLite module.
 
