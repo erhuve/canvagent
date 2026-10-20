@@ -13,6 +13,8 @@ import {
   type ThreadMessageLike,
 } from "@assistant-ui/react";
 import { MarkdownTextPrimitive } from "@assistant-ui/react-markdown";
+import { defaultAgentSettings, type AgentSettings } from "../shared/settings";
+import { AgentSettingsControls } from "./AgentSettings";
 import { errorMessage } from "./api";
 import { Icon } from "./icons";
 import type { AppState, Message, Session } from "./types";
@@ -53,11 +55,16 @@ function ChatMessage() {
   </MessagePrimitive.Root>;
 }
 
-function ConversationItem({ disabled }: { disabled: boolean }) {
+function ConversationItem({ disabled, sessions }: { disabled: boolean; sessions: Session[] }) {
   const title = useAuiState(s => s.threadListItem.title ?? "New conversation");
+  const id = useAuiState(s => s.threadListItem.id);
+  const status = sessions.find(session => session.id === id)?.status;
+  const working = !!status && activeStatuses.has(status);
+  const statusLabel = status === "awaiting_approval" ? "Needs approval" : "Working";
   return <ThreadListItemPrimitive.Root className="thread-list-item">
     <ThreadListItemPrimitive.Trigger className="thread-list-trigger" aria-label={`Open conversation: ${title}`} disabled={disabled}>
       <Icon name="chat" size={15} /><ThreadListItemPrimitive.Title fallback="New conversation" />
+      {working && <span className={`thread-run-status ${status === "awaiting_approval" ? "needs-approval" : ""}`} role="status" aria-label={statusLabel} title={statusLabel}><span className={status === "awaiting_approval" ? "status-dot" : "working-spinner"} /></span>}
     </ThreadListItemPrimitive.Trigger>
   </ThreadListItemPrimitive.Root>;
 }
@@ -77,7 +84,9 @@ type WorkspaceProps = {
   onActivateSession: (id: string) => Promise<void>;
   onConnect: () => void;
   onInterrupt: () => Promise<void>;
-  onChangeModel: (model: string) => void;
+  settingsSaving?: boolean;
+  onChangeSettings: (settings: AgentSettings) => Promise<void>;
+  onSaveDefaultSettings: (settings: AgentSettings) => Promise<void>;
   onError: (message: string) => void;
   onDismissNotice: () => void;
   onOpenWorkspace: () => void;
@@ -85,8 +94,7 @@ type WorkspaceProps = {
   children: ReactNode;
 };
 
-function Composer({ runtime, props, running, ready, inputRef }: {
-  runtime: AssistantRuntime;
+function Composer({ props, running, ready, inputRef }: {
   props: WorkspaceProps;
   running: boolean;
   ready: boolean;
@@ -99,7 +107,6 @@ function Composer({ runtime, props, running, ready, inputRef }: {
     if (!text.trim() || props.sending || props.sessionBusy || !ready || !props.online) return;
     try {
       await props.onSend(text);
-      if (runtime.thread.composer.getState().text === text) runtime.thread.composer.setText("");
     } catch (error) { props.onError(errorMessage(error)); }
   };
   return <div className="composer-area">
@@ -113,10 +120,10 @@ function Composer({ runtime, props, running, ready, inputRef }: {
         className="composer-input"
         rows={2}
         maxRows={7}
-        submitMode="ctrlEnter"
+        submitMode="enter"
         autoFocus
         onKeyDown={event => {
-          if (running && event.key === "Enter" && (event.metaKey || event.ctrlKey) && !event.nativeEvent.isComposing) {
+          if (running && event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
             event.preventDefault();
             void sendUpdate();
           }
@@ -127,12 +134,12 @@ function Composer({ runtime, props, running, ready, inputRef }: {
         <div className="composer-buttons">
           {running && <ComposerPrimitive.Cancel className="stop-button" aria-label="Stop agent" title="Stop the current turn"><Icon name="stop" size={13} />Stop</ComposerPrimitive.Cancel>}
           {running
-            ? <button type="button" className="send-button" aria-label="Send update to Codex" title="Send update (⌘ / Ctrl + Enter)" disabled={!text.trim() || props.sending || props.sessionBusy || !props.online || !ready} onClick={() => void sendUpdate()}><Icon name="arrow" size={18} /></button>
-            : <ComposerPrimitive.Send className="send-button" aria-label="Send message to Codex" title="Send (⌘ / Ctrl + Enter)"><Icon name="arrow" size={18} /></ComposerPrimitive.Send>}
+            ? <button type="button" className="send-button" aria-label="Send update to Codex" title="Send update (Enter)" disabled={!text.trim() || props.sending || props.sessionBusy || !props.online || !ready} onClick={() => void sendUpdate()}><Icon name="arrow" size={18} /></button>
+            : <ComposerPrimitive.Send className="send-button" aria-label="Send message to Codex" title="Send (Enter)"><Icon name="arrow" size={18} /></ComposerPrimitive.Send>}
         </div>
       </div>
     </ComposerPrimitive.Root>
-    <div className="composer-footer"><span>Codex works in your local workspace.</span><span>⌘ / Ctrl ↵</span></div>
+    <div className="composer-footer"><span>Codex works in your local workspace.</span><span>Enter to send · Shift+Enter for newline</span></div>
   </div>;
 }
 
@@ -143,12 +150,25 @@ export function ChatWorkspace(props: WorkspaceProps) {
   const [activityOpen, setActivityOpen] = useState(false);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const runtimeRef = useRef<AssistantRuntime>();
+  const drafts = useRef(new Map<string, string>());
+  const visibleSessionId = useRef<string>();
   const session = state?.sessions.find(item => item.id === state.activeSessionId) ?? state?.sessions.at(-1);
+  visibleSessionId.current = session?.id;
   const running = !!session && activeStatuses.has(session.status);
   const ready = !!state?.runtime.connected && !!state.runtime.authenticated;
   const threads = useMemo(() => [...(state?.sessions ?? [])].reverse().map(item => ({
     id: item.id, title: titleFor(item), status: "regular" as const,
   })), [state?.sessions]);
+  const saveDraft = () => {
+    if (session) drafts.current.set(session.id, runtimeRef.current?.thread.composer.getState().text ?? "");
+  };
+  const sendMessage = async (text: string) => {
+    const targetId = session?.id;
+    await props.onSend(text);
+    if (targetId && drafts.current.get(targetId) === text) drafts.current.delete(targetId);
+    const composer = runtimeRef.current?.thread.composer;
+    if (visibleSessionId.current === targetId && composer?.getState().text === text) composer.setText("");
+  };
   const runtime = useExternalStoreRuntime({
     messages: session?.messages ?? [],
     convertMessage: toChatMessage,
@@ -157,12 +177,14 @@ export function ChatWorkspace(props: WorkspaceProps) {
     isSendDisabled: !ready || !props.online || props.sending,
     onNew: async message => {
       const text = message.content.filter(part => part.type === "text").map(part => part.text).join("\n");
-      try { await props.onSend(text); }
+      const targetId = session?.id;
+      try { await sendMessage(text); }
       catch (error) {
         // assistant-ui clears a submitted draft; restore it when the server
         // rejects the send, without overwriting anything typed meanwhile.
         const composer = runtimeRef.current?.thread.composer;
-        if (composer && !composer.getState().text.trim()) composer.setText(text);
+        if (visibleSessionId.current === targetId && composer && !composer.getState().text.trim()) composer.setText(text);
+        else if (targetId && !drafts.current.get(targetId)?.trim()) drafts.current.set(targetId, text);
         props.onError(errorMessage(error));
       }
     },
@@ -171,11 +193,15 @@ export function ChatWorkspace(props: WorkspaceProps) {
       threadId: session?.id,
       threads,
       isLoading: !state || props.sessionBusy,
-      onSwitchToNewThread: async () => { await props.onNewSession(); setSidebarOpen(false); },
-      onSwitchToThread: async id => { await props.onActivateSession(id); setSidebarOpen(false); },
+      onSwitchToNewThread: async () => { saveDraft(); await props.onNewSession(); setSidebarOpen(false); },
+      onSwitchToThread: async id => { saveDraft(); await props.onActivateSession(id); setSidebarOpen(false); },
     } },
   });
   runtimeRef.current = runtime;
+
+  useEffect(() => {
+    runtime.thread.composer.setText(session ? drafts.current.get(session.id) ?? "" : "");
+  }, [session?.id, runtime]);
 
   useEffect(() => {
     if (!props.draftRequest) return;
@@ -191,7 +217,8 @@ export function ChatWorkspace(props: WorkspaceProps) {
     return () => window.removeEventListener("keydown", close);
   }, [sidebarOpen]);
 
-  const busy = props.sessionBusy || props.sending || running;
+  const navigationBusy = !state || props.sessionBusy;
+  const settings = session?.settings ?? state?.runtime.settings ?? defaultAgentSettings();
   const activities = session?.activities ?? [];
   const activeTool = [...activities].reverse().find(item => item.status === "running" || item.status === "in_progress");
   const suggest = (text: string) => { runtime.thread.composer.setText(text); inputRef.current?.focus(); };
@@ -202,9 +229,9 @@ export function ChatWorkspace(props: WorkspaceProps) {
       <aside className="app-sidebar" aria-label="Conversation history">
         <div className="sidebar-brand"><a href="/" aria-label="Canvagent home"><span className="brand-icon"><Icon name="board" size={19} /></span>canvagent</a><button className="icon-button sidebar-close" aria-label="Close sidebar" onClick={() => setSidebarOpen(false)}><Icon name="close" size={17} /></button></div>
         <ThreadListPrimitive.Root className="thread-list">
-          <ThreadListPrimitive.New className="new-conversation" disabled={busy} aria-label="New conversation"><Icon name="compose" size={17} />New conversation<span>＋</span></ThreadListPrimitive.New>
+          <ThreadListPrimitive.New className="new-conversation" disabled={navigationBusy} aria-label="New conversation"><Icon name="compose" size={17} />New conversation<span>＋</span></ThreadListPrimitive.New>
           <span className="sidebar-label">Conversations</span>
-          <div className="thread-list-items"><ThreadListPrimitive.Items>{() => <ConversationItem disabled={busy} />}</ThreadListPrimitive.Items></div>
+          <div className="thread-list-items"><ThreadListPrimitive.Items>{() => <ConversationItem disabled={navigationBusy} sessions={state?.sessions ?? []} />}</ThreadListPrimitive.Items></div>
         </ThreadListPrimitive.Root>
         <div className="sidebar-workspace" title={state?.project.workspace}><span className="workspace-icon"><Icon name="folder" size={17} /></span><div><strong>{state?.project.name ?? "Local workspace"}</strong><span>Local workspace</span></div>{state?.project.desktop ? <button className="icon-button" aria-label="Open workspace" title="Open another workspace" onClick={props.onOpenWorkspace}><Icon name="compose" size={16} /></button> : <span className={`status-dot ${props.online ? "online" : ""}`} />}</div>
       </aside>
@@ -217,7 +244,7 @@ export function ChatWorkspace(props: WorkspaceProps) {
         <nav className="mobile-tabs" aria-label="Workspace view"><button className={mobilePane === "chat" ? "active" : ""} onClick={() => setMobilePane("chat")}><Icon name="chat" size={16} />Conversation</button><button className={mobilePane === "canvas" ? "active" : ""} onClick={() => setMobilePane("canvas")}><Icon name="board" size={16} />Canvas</button></nav>
         <main className="workspace-layout">
           <section className="conversation-pane" aria-label="Agent conversation">
-            <div className="conversation-header"><label className="model-select"><Icon name="terminal" size={16} /><select aria-label="Agent model" value={state?.runtime.model || state?.runtime.models[0]?.id || ""} onChange={event => props.onChangeModel(event.target.value)} disabled={busy || !state?.runtime.models.length}>{state?.runtime.models.length ? state.runtime.models.map(model => <option key={model.id} value={model.id}>{model.name}</option>) : <option value="">Codex</option>}</select><Icon name="chevron" size={13} /></label><span className="conversation-label">Conversation</span></div>
+            <div className="conversation-header"><AgentSettingsControls key={session?.id ?? "new"} settings={settings} defaults={state?.runtime.defaults} models={state?.runtime.models ?? []} requirements={state?.runtime.requirements} running={running} disabled={!state || props.sessionBusy} saving={props.settingsSaving} onChange={props.onChangeSettings} onSaveDefaults={props.onSaveDefaultSettings} onError={props.onError} /></div>
             <ThreadPrimitive.Root className="chat-thread">
               <ThreadPrimitive.Viewport className="transcript">
                 {!session?.messages.length && !running && <div className="welcome">
@@ -233,7 +260,7 @@ export function ChatWorkspace(props: WorkspaceProps) {
                 <ThreadPrimitive.ScrollToBottom className="scroll-to-bottom" aria-label="Scroll to latest message"><Icon name="down" size={17} /></ThreadPrimitive.ScrollToBottom>
               </ThreadPrimitive.Viewport>
               {!ready && state && <div className="connection-note"><Icon name="info" size={15} /><span>{state.runtime.error || (state.runtime.connected ? "Sign in with codex login, then reconnect." : "Connect Codex to start a conversation.")}</span></div>}
-              <Composer runtime={runtime} props={props} running={running} ready={ready} inputRef={inputRef} />
+              <Composer props={{ ...props, onSend: sendMessage }} running={running} ready={ready} inputRef={inputRef} />
             </ThreadPrimitive.Root>
           </section>
           {props.children}

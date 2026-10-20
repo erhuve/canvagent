@@ -3,29 +3,40 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { request as httpRequest } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { test, type TestContext } from 'node:test';
 import { createApplication } from '../src/server/app.ts';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { RuntimeOptions } from '../src/server/runtime.ts';
+import { Store } from '../src/server/store.ts';
+import { defaultAgentSettings, type AgentSettings } from '../src/shared/settings.ts';
 
 class FakeRuntime {
+  closed = false;
   threadId: string | null = null;
   activeTurnId: string | null = null;
-  starts: { text: string; requestId?: string; turnId: string }[] = [];
+  opens: { threadId: string; settings: AgentSettings }[] = [];
+  starts: { text: string; requestId?: string; turnId: string; settings: AgentSettings }[] = [];
   steers: { text: string; turnId: string }[] = [];
   answers: { id: string | number; result: any }[] = [];
   nextSteerError: Error | undefined;
+  connection: any = { authenticated: true, version: 'test-runtime', models: [{ id: 'test-model', name: 'Test model' }] };
   constructor(readonly options: RuntimeOptions) {}
   async connect() {
     this.options.onEvent({ type: 'connection.changed', payload: { state: 'connected' } });
-    return { authenticated: true, version: 'test-runtime', models: [{ id: 'test-model', name: 'Test model' }] };
+    return this.connection;
   }
-  async open(threadId?: string) { this.threadId = threadId ?? 'thread-test'; return this.threadId; }
+  settingsSnapshot() { return structuredClone((this.options as RuntimeOptions & { settings: () => AgentSettings }).settings()); }
+  async open(threadId?: string) {
+    this.threadId = threadId ?? `thread-${randomUUID()}`;
+    this.opens.push({ threadId: this.threadId, settings: this.settingsSnapshot() });
+    return this.threadId;
+  }
   async start(text: string, requestId?: string) {
     this.activeTurnId = `turn-${this.starts.length + 1}`;
-    this.starts.push({ text, requestId, turnId: this.activeTurnId });
+    this.starts.push({ text, requestId, turnId: this.activeTurnId, settings: this.settingsSnapshot() });
     this.options.onEvent({ type: 'turn/started', payload: { threadId: this.threadId, turn: { id: this.activeTurnId } } });
     return this.activeTurnId;
   }
@@ -36,7 +47,7 @@ class FakeRuntime {
   }
   answer(id: string | number, result: any) { this.answers.push({ id, result }); }
   async interrupt() { this.complete('interrupted'); }
-  close() {}
+  close() { this.closed = true; }
   complete(status = 'completed') {
     const turnId = this.activeTurnId; this.activeTurnId = null;
     this.options.onEvent({ type: 'turn/completed', payload: { threadId: this.threadId, turn: { id: turnId, status } } });
@@ -160,7 +171,9 @@ test('canvas MCP discovery uses separate credentials and calls are scoped to the
   const current = await client.callTool({ name: 'read_canvas', arguments: {} });
   assert.equal(current.isError, false);
   const other = await f.request('/api/sessions', { title: 'Other conversation' });
-  const otherClient = await canvasClient(t, `${f.base}/mcp/${other.body.id}`, token);
+  assert.equal((await f.request(`/mcp/${other.body.id}`, discovery, { Authorization: `Bearer ${token}` })).response.status, 401);
+  await f.request('/api/runtime/connect', {});
+  const otherClient = await canvasClient(t, `${f.base}/mcp/${other.body.id}`, f.runtimes[1].options.canvasMcp!.token);
   assert.equal((await otherClient.callTool({ name: 'read_canvas', arguments: {} })).isError, true);
   const failedCapture = await client.callTool({ name: 'capture_region', arguments: {} });
   assert.equal(failedCapture.isError, true);
@@ -432,4 +445,275 @@ test('queued dispatch waits for a late start acknowledgment after terminal compl
   await first;
   await waitFor(() => runtime.starts.length === 2);
   assert.equal(f.application.state().sessions[0].status, 'running');
+});
+
+test('another conversation can start before a pending start acknowledgment returns', async t => {
+  let acknowledge: (() => void) | undefined;
+  const f = await fixture(t, runtime => {
+    const start = runtime.start.bind(runtime);
+    runtime.start = async (text, id) => {
+      const turnId = await start(text, id);
+      if (id === 'slow-first') await new Promise<void>(resolve => { acknowledge = resolve; });
+      return turnId;
+    };
+  });
+  const first = f.message('slow-first');
+  await waitFor(() => !!acknowledge);
+  const other = (await f.request('/api/sessions', { title: 'Parallel work' })).body;
+  const second = f.request(`/api/sessions/${other.id}/messages`, { requestId: 'second', text: 'Work in parallel' });
+  try {
+    await waitFor(() => f.runtimes[1]?.starts.length === 1);
+    assert.equal((await second).response.status, 202);
+    assert.deepEqual(f.application.state().sessions.map(s => s.status), ['running', 'running']);
+    assert.notEqual(f.runtimes[0].threadId, f.runtimes[1].threadId);
+    assert.equal(f.application.state().activeSessionId, other.id);
+    f.runtimes[0].complete(); f.runtimes[1].complete();
+    assert.equal((await f.request('/api/settings', { model: 'test-model' })).response.status, 200);
+    assert.equal(f.application.state().runtime.settings.model, 'test-model');
+    assert.equal(f.application.state().sessions[0].settings?.model, '');
+    assert.ok(f.runtimes.every(runtime => !runtime.closed));
+  } finally { acknowledge!(); await first; }
+});
+
+test('parallel streams, approvals with matching native IDs, steering and stop stay in their conversation', async t => {
+  const f = await fixture(t);
+  const other = (await f.request('/api/sessions', { title: 'Other' })).body;
+  const sendOther = (id: string) => f.request(`/api/sessions/${other.id}/messages`, { requestId: id, text: 'Other task' });
+  await Promise.all([f.message('first'), sendOther('second')]);
+  const [first, second] = f.runtimes;
+  for (const [runtime, text] of [[first, 'First reply'], [second, 'Second reply']] as const) {
+    runtime.options.onEvent({ type: 'item/agentMessage/delta', payload: { threadId: runtime.threadId, turnId: runtime.activeTurnId, itemId: 'same-item', delta: text } });
+    runtime.approval(42);
+  }
+  const [a, b] = f.application.state().sessions;
+  assert.equal(a.messages.find(m => m.id === 'same-item')?.text, 'First reply');
+  assert.equal(b.messages.find(m => m.id === 'same-item')?.text, 'Second reply');
+  assert.equal((await f.request(`/api/sessions/${a.id}/approvals/${b.pendingApprovals[0].id}`, { decision: 'accept' })).response.status, 409);
+  await f.request(`/api/sessions/${a.id}/approvals/${a.pendingApprovals[0].id}`, { decision: 'accept' });
+  assert.equal(first.answers.length, 1); assert.equal(second.answers.length, 0);
+  assert.equal(b.status, 'awaiting_approval');
+  await f.message('update-first', 'Update the first task');
+  assert.equal(first.steers.length, 1); assert.equal(second.steers.length, 0);
+  await sendOther('queued-second');
+  assert.equal(b.queued.length, 1);
+  await f.request(`/api/sessions/${a.id}/interrupt`, {});
+  assert.equal(a.status, 'idle'); assert.equal(b.status, 'awaiting_approval');
+  assert.equal(b.queued.length, 1); assert.ok(second.activeTurnId);
+  second.complete();
+  await waitFor(() => second.starts.length === 2);
+  assert.equal(a.status, 'idle'); assert.equal(b.status, 'running');
+});
+
+test('canvas notices and MCP credentials are independent across simultaneous turns', async t => {
+  const f = await fixture(t);
+  await f.message('first');
+  const other = (await f.request('/api/sessions', { title: 'Other' })).body;
+  await f.request(`/api/sessions/${other.id}/messages`, { requestId: 'second', text: 'Other task' });
+  const [first, second] = f.runtimes;
+  const clients = await Promise.all(f.runtimes.map(runtime => canvasClient(t, runtime.options.canvasMcp!.url(), runtime.options.canvasMcp!.token)));
+  const wrongToken = await f.request(`/mcp/${other.id}`, { jsonrpc: '2.0', id: 1, method: 'tools/list' }, { Authorization: `Bearer ${first.options.canvasMcp!.token}` });
+  assert.equal(wrongToken.response.status, 401);
+  for (const client of clients) {
+    const draw = await client.callTool({ name: 'apply_canvas_ops', arguments: { requestId: 'same-draw', observedBoardRevision: 0,
+      operations: [{ kind: 'create', shape: 'text', text: 'Parallel note' }] } });
+    assert.equal(draw.isError, false);
+  }
+  assert.equal(f.application.store.board().elements.length, 2);
+  assert.deepEqual(new Set(Object.values(f.application.store.board().metadata).map(m => m.actor)), new Set([`agent:${f.sessionId}`, `agent:${other.id}`]));
+  first.nextSteerError = Object.assign(new Error('Uncertain first notice'), { uncertain: true });
+  await f.create('human-edit');
+  await waitFor(() => first.steers.length === 1 && second.steers.length === 1);
+  await f.create('second-edit');
+  await waitFor(() => second.steers.length === 2);
+  assert.equal(first.steers.length, 1);
+  first.complete();
+  await f.create('after-first-completes');
+  await waitFor(() => second.steers.length === 3);
+  assert.equal(first.steers.length, 1);
+  assert.equal((await clients[0].callTool({ name: 'read_canvas', arguments: {} })).isError, true);
+  assert.equal((await clients[1].callTool({ name: 'read_canvas', arguments: {} })).isError, false);
+});
+
+test('a disconnected runtime can resume without interrupting other work or accepting stale events', async t => {
+  const f = await fixture(t);
+  await f.message('first');
+  const other = (await f.request('/api/sessions', { title: 'Other' })).body;
+  await f.request(`/api/sessions/${other.id}/messages`, { requestId: 'second', text: 'Other task' });
+  const [first, second] = f.runtimes;
+  const originalThread = first.threadId;
+  first.options.onEvent({ type: 'connection.changed', payload: { state: 'disconnected', reason: 'First process exited', activeTurnId: first.activeTurnId } });
+  first.activeTurnId = null;
+  assert.deepEqual(f.application.state().sessions.map(s => s.status), ['unknown', 'running']);
+  assert.equal(f.application.state().runtime.connected, true);
+  assert.equal(f.application.state().runtime.authenticated, true);
+  await f.message('resume-first');
+  const resumed = f.runtimes[2];
+  assert.equal(resumed.threadId, originalThread);
+  assert.notEqual(resumed.options.canvasMcp!.token, first.options.canvasMcp!.token);
+  first.options.onEvent({ type: 'turn/completed', payload: { threadId: originalThread, turn: { id: 'turn-1', status: 'completed' } } });
+  assert.deepEqual(f.application.state().sessions.map(s => s.status), ['running', 'running']);
+  assert.ok(second.activeTurnId);
+  await f.application.close();
+  assert.ok(f.runtimes.every(runtime => runtime.closed));
+});
+
+function settingsCatalog(runtime: FakeRuntime) {
+  runtime.connection.models = [
+    { id: 'test-model', name: 'Test model', isDefault: true, defaultReasoningEffort: 'high',
+      supportedReasoningEfforts: [{ reasoningEffort: 'low', description: 'Quick' }, { reasoningEffort: 'high', description: 'Thorough' }],
+      serviceTiers: [{ id: 'fast', name: 'Fast' }, { id: 'flex', name: 'Flexible' }] },
+    { id: 'small-model', name: 'Small model', defaultReasoningEffort: 'low',
+      supportedReasoningEfforts: [{ reasoningEffort: 'low', description: 'Quick' }], serviceTiers: [{ id: 'flex', name: 'Flexible' }] },
+  ];
+}
+
+test('workspace settings are defaults for new conversations; existing sessions keep independent settings', async t => {
+  const f = await fixture(t, settingsCatalog);
+  assert.deepEqual(f.bootstrap.body.runtime.settings, defaultAgentSettings());
+  assert.deepEqual(f.bootstrap.body.sessions[0].settings, defaultAgentSettings());
+  await f.request('/api/runtime/connect', {});
+  const defaults = { model: 'test-model', reasoningEffort: 'high', serviceTier: 'fast', networkAccess: true,
+    writableRoots: [f.workspace], configOverrides: { personality: 'friendly' } };
+  assert.equal((await f.request('/api/settings', defaults)).response.status, 200);
+  const other = (await f.request('/api/sessions', { title: 'Configured defaults' })).body;
+  assert.deepEqual(other.settings, { ...defaultAgentSettings(), ...defaults });
+  assert.deepEqual(f.application.state().sessions[0].settings, defaultAgentSettings());
+  const changed = await f.request(`/api/sessions/${other.id}/settings`, { reasoningEffort: 'low', serviceTier: 'flex' });
+  assert.equal(changed.response.status, 200);
+  assert.equal(f.application.state().sessions[1].settings?.reasoningEffort, 'low');
+  assert.equal(f.application.state().runtime.settings.reasoningEffort, 'high');
+  assert.equal(f.application.state().runtime.model, 'test-model');
+  assert.equal((await f.request('/api/settings', { verbosity: 'low' })).response.status, 200);
+  assert.equal(f.application.state().runtime.settings.model, 'test-model', 'Partial defaults preserve the other selected values.');
+  assert.equal(f.application.state().sessions[1].settings?.verbosity, '', 'Changing defaults leaves existing sessions unchanged.');
+  await Promise.all([
+    f.message('original-defaults'),
+    f.request(`/api/sessions/${other.id}/messages`, { requestId: 'custom-defaults', text: 'Use the configured settings' }),
+  ]);
+  assert.deepEqual(f.runtimes[0].starts[0].settings, defaultAgentSettings());
+  assert.deepEqual(f.runtimes[1].starts[0].settings, { ...defaultAgentSettings(), ...defaults, reasoningEffort: 'low', serviceTier: 'flex' });
+  assert.ok(f.runtimes.every(runtime => !runtime.closed));
+});
+
+test('settings changed during parallel work apply to the next turn, including queued dispatch', async t => {
+  const f = await fixture(t, settingsCatalog);
+  await f.message('first');
+  const other = (await f.request('/api/sessions', { title: 'Other active task' })).body;
+  await f.request(`/api/sessions/${other.id}/messages`, { requestId: 'other', text: 'Continue independently' });
+  const [first, second] = f.runtimes;
+  const originalThreadId = first.threadId;
+  const originalSettings = structuredClone(first.starts[0].settings);
+  first.approval(31);
+  await f.message('queued-settings', 'Use my new thinking level for the next turn');
+  const update = { model: 'test-model', reasoningEffort: 'high', serviceTier: 'fast', collaborationMode: 'plan' as const };
+  assert.equal((await f.request(`/api/sessions/${f.sessionId}/settings`, update)).response.status, 200);
+  assert.equal((await f.request('/api/settings', { model: 'small-model', reasoningEffort: 'low' })).response.status, 200);
+  assert.deepEqual(first.starts[0].settings, originalSettings, 'An active turn retains its dispatch snapshot.');
+  assert.deepEqual(second.starts[0].settings, defaultAgentSettings());
+  assert.equal(f.application.state().sessions[1].settings?.model, '');
+  assert.equal(f.application.state().sessions[0].pendingApprovals.length, 1);
+  assert.ok(f.runtimes.every(runtime => !runtime.closed));
+  assert.ok(second.activeTurnId);
+  first.complete();
+  await waitFor(() => f.runtimes[2]?.starts.length === 1);
+  const resumed = f.runtimes[2];
+  assert.equal(first.closed, true, 'A changed configuration reconnects only after the active turn completes.');
+  assert.equal(first.starts.length, 1);
+  assert.deepEqual(first.starts[0].settings, originalSettings);
+  assert.deepEqual(resumed.starts[0].settings, { ...defaultAgentSettings(), ...update });
+  assert.equal(resumed.threadId, originalThreadId, 'Reconnecting configuration preserves the existing native thread.');
+  assert.equal(resumed.opens[0].threadId, originalThreadId);
+  assert.equal(second.starts.length, 1);
+  assert.equal(second.closed, false);
+  assert.ok(second.activeTurnId);
+  resumed.complete();
+  assert.equal((await f.request(`/api/sessions/${f.sessionId}/settings`, { reasoningEffort: 'low', collaborationMode: 'default' })).response.status, 200);
+  assert.equal(resumed.closed, false, 'Saving settings leaves an idle runtime open until the next dispatch.');
+  await f.message('after-settings');
+  const next = f.runtimes[3];
+  assert.equal(resumed.closed, true);
+  assert.equal(next.threadId, originalThreadId);
+  assert.equal(next.starts[0].settings.reasoningEffort, 'low');
+  assert.equal(next.starts[0].settings.collaborationMode, 'default');
+  assert.equal(next.starts[0].settings.serviceTier, 'fast');
+  assert.equal(second.closed, false);
+});
+
+test('invalid settings and incompatible capabilities retain prior values without closing active runtimes', async t => {
+  const f = await fixture(t, runtime => {
+    settingsCatalog(runtime);
+    runtime.connection.requirements = { allowedApprovalPolicies: ['on-request'], allowedApprovalsReviewers: ['user'],
+      allowedSandboxModes: ['read-only', 'workspace-write'], allowedWebSearchModes: ['disabled', 'cached'] };
+  });
+  await f.message('active-validation');
+  const original = structuredClone(f.application.state());
+  const invalid: any[] = [
+    { model: 'test-model', reasoningEffort: 'ultra' },
+    { model: 'small-model', reasoningEffort: 'high' }, { model: 'small-model', serviceTier: 'fast' },
+    { reasoningEffort: 'ultra' }, { serviceTier: 'turbo' }, { approvalPolicy: 'never' },
+    { approvalsReviewer: 'auto_review' }, { sandboxMode: 'danger-full-access' }, { webSearch: 'live' },
+    { fastMode: true }, { networkAccess: 'true' }, { writableRoots: [42] }, { configOverrides: [] },
+    { collaborationMode: 'unsupported' }, { reasoningSummary: 'verbose' }, { verbosity: 'xhigh' }, { model: null },
+  ];
+  for (const value of invalid) {
+    for (const path of ['/api/settings', `/api/sessions/${f.sessionId}/settings`]) {
+      const response = await f.request(path, value);
+      assert.equal(response.response.status, 400, `${path} must reject ${JSON.stringify(value)}`);
+      assert.deepEqual(f.application.state().runtime.settings, original.runtime.settings);
+      assert.deepEqual(f.application.state().sessions[0].settings, original.sessions[0].settings);
+      assert.equal(f.application.state().sessions[0].status, 'running');
+      assert.equal(f.runtimes.length, 1);
+      assert.equal(f.runtimes[0].closed, false);
+    }
+  }
+  assert.equal((await f.request('/api/sessions/missing-session/settings', { model: 'test-model' })).response.status, 404);
+});
+
+test('session settings and workspace defaults survive restart without being merged into one another', async t => {
+  const f = await fixture(t, settingsCatalog);
+  await f.request('/api/runtime/connect', {});
+  const sessionSettings = { model: 'test-model', reasoningEffort: 'high', serviceTier: 'fast', approvalPolicy: 'untrusted' as const,
+    sandboxMode: 'read-only' as const, additionalInstructions: 'Keep all diagrams compact.', configOverrides: { personality: 'pragmatic' } };
+  assert.equal((await f.request(`/api/sessions/${f.sessionId}/settings`, sessionSettings)).response.status, 200);
+  const defaults = { model: 'small-model', reasoningEffort: 'low', verbosity: 'high' as const };
+  assert.equal((await f.request('/api/settings', defaults)).response.status, 200);
+  await f.message('persist-settings');
+  f.runtimes.at(-1)!.complete();
+  const threadId = f.runtimes.at(-1)!.threadId;
+  const dataDir = f.application.store.dataDir;
+  await f.application.close();
+  const reopened = createApplication({ workspace: f.workspace, dataDir, port: 0 });
+  try {
+    assert.deepEqual(reopened.state().runtime.settings, { ...defaultAgentSettings(), ...defaults });
+    assert.deepEqual(reopened.state().sessions[0].settings, { ...defaultAgentSettings(), ...sessionSettings });
+    assert.equal(reopened.state().sessions[0].threadId, threadId);
+    assert.equal(reopened.state().runtime.model, 'small-model');
+  } finally { await reopened.close(); }
+});
+
+test('legacy saved model migrates to session settings once and remains separate from later defaults', async t => {
+  const f = await fixture(t);
+  const dataDir = f.application.store.dataDir;
+  await f.application.close();
+  const store = new Store(dataDir);
+  const sessions = store.get<any[]>('sessions')!;
+  delete sessions[0].settings;
+  store.set('sessions', sessions);
+  store.set('model', 'test-model');
+  store.set('settings', null);
+  store.close();
+  const migrated = createApplication({ workspace: f.workspace, dataDir, port: 0 });
+  assert.deepEqual(migrated.state().sessions[0].settings, { ...defaultAgentSettings(), model: 'test-model' });
+  assert.deepEqual(migrated.store.get<any[]>('sessions')![0].settings, migrated.state().sessions[0].settings,
+    'Migration must be durable before workspace defaults can change or the application exits unexpectedly.');
+  await migrated.close();
+  const changedDefaults = new Store(dataDir);
+  changedDefaults.set('settings', { ...defaultAgentSettings(), model: 'small-model', reasoningEffort: 'low' });
+  changedDefaults.set('model', 'small-model');
+  changedDefaults.close();
+  const reopened = createApplication({ workspace: f.workspace, dataDir, port: 0 });
+  try {
+    assert.equal(reopened.state().runtime.settings.model, 'small-model');
+    assert.deepEqual(reopened.state().sessions[0].settings, { ...defaultAgentSettings(), model: 'test-model' });
+  } finally { await reopened.close(); }
 });

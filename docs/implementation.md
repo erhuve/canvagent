@@ -111,4 +111,4 @@ Build runs TypeScript checking and creates the browser bundle. The 64 automated 
 
 The automated suites do not require provider authentication or model calls. GitHub CI runs the build and both suites. The separate `test:codex-tools` smoke check requires an installed Codex CLI and verifies native history retention and refreshed tool discovery against a local inference stub; it does not make paid model calls. Node 24's built-in SQLite module may emit its standard experimental warning.
 
-The current application supports one editing browser, one project board, and one active agent turn at a time. Human multiplayer, additional providers, external MCP access, hosted operation, and portable project export remain follow-up work.
+The current application supports one editing browser, one project board, and parallel conversations with one active agent turn per conversation. Each conversation owns its runtime, dispatch queue, approvals, interruption, canvas MCP credentials, and live resource notices. Human multiplayer, additional providers, external MCP access, hosted operation, and portable project export remain follow-up work.

@@ -1,3 +1,5 @@
+import type { AgentModel, AgentSettings, SettingsRequirements } from '../shared/settings';
+
 export type SceneElement = Record<string, any> & { id: string; isDeleted?: boolean };
 export type Board = {
   id: string;
@@ -32,6 +34,7 @@ export type Approval = {
   [key: string]: any;
 };
 export type Session = {
+  settings?: AgentSettings;
   id: string;
   title: string;
   threadId?: string;
@@ -46,8 +49,11 @@ export type Runtime = {
   connected: boolean;
   authenticated: boolean;
   version?: string;
-  models: { id: string; name: string }[];
+  models: AgentModel[];
   model?: string;
+  settings: AgentSettings;
+  defaults?: Partial<AgentSettings>;
+  requirements?: SettingsRequirements;
   error?: string;
   capabilities?: Record<string, boolean>;
 };

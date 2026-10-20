@@ -1,16 +1,26 @@
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createInterface, type Interface } from "node:readline";
 import { canvasServerName, canvasTokenEnvironment } from './canvas-mcp.js';
+import { defaultAgentSettings, serviceTierForModel, settingsCompatibilityError, type AgentModel, type AgentSettings, type SettingsRequirements } from '../shared/settings.js';
 
 export type RpcId = string | number;
 export type RuntimeEvent = { type: string; payload: any };
 export type ToolResult = { contentItems: any[]; success: boolean };
 export type CanvasTool = { name: string; description: string; inputSchema: any };
 export type ApprovalRequest = { id: RpcId; method: string; params: any };
+export type RuntimeConnection = {
+  authenticated: boolean;
+  models: AgentModel[];
+  version: string;
+  defaults?: Partial<AgentSettings>;
+  requirements?: SettingsRequirements;
+};
 
 export interface RuntimeOptions {
   cwd: string;
   model?: string;
+  /** Read once when opening a thread so edits during a run affect its next turn. */
+  settings?: () => AgentSettings;
   tools?: CanvasTool[];
   developerInstructions?: string;
   /** Per-conversation local MCP endpoint. Unlike persisted dynamic tools, this
@@ -54,7 +64,7 @@ const interactiveMethods = new Set([
   "applyPatchApproval",
 ]);
 
-/** Codex app-server 0.159.2 newline-delimited JSON-RPC over local stdio. */
+/** Codex app-server newline-delimited JSON-RPC over local stdio. */
 export class CodexRuntime {
   threadId: string | null = null;
   activeTurnId: string | null = null;
@@ -64,7 +74,12 @@ export class CodexRuntime {
   private pending = new Map<RpcId, PendingRequest>();
   private incoming = new Map<RpcId, ApprovalRequest>();
   private terminalTurns = new Set<string>();
-  private connecting: Promise<{ authenticated: boolean; models: { id: string; name: string }[]; version: string }> | null = null;
+  private connecting: Promise<RuntimeConnection> | null = null;
+  private connection: RuntimeConnection | null = null;
+  private openedSettings: AgentSettings | null = null;
+  private effectiveModel: string | null = null;
+  private effectiveEffort: string | null = null;
+  private effectiveSandbox: any = null;
   private connected = false;
   private starting = false;
   private opening = false;
@@ -75,7 +90,7 @@ export class CodexRuntime {
 
   constructor(private readonly options: RuntimeOptions) {}
 
-  connect(): Promise<{ authenticated: boolean; models: { id: string; name: string }[]; version: string }> {
+  connect(): Promise<RuntimeConnection> {
     if (this.connecting) return this.connecting;
     this.intentionalClose = false;
     const generation = ++this.generation;
@@ -110,10 +125,12 @@ export class CodexRuntime {
           capabilities: { experimentalApi: true, requestAttestation: false },
         });
         this.write({ method: "initialized", params: {} });
-        const [account, firstPage, version] = await Promise.all([
+        const [account, firstPage, version, config, requirements] = await Promise.all([
           this.request("account/read", { refreshToken: false }),
           this.request("model/list", { limit: 100 }),
           this.readVersion(initialized.userAgent),
+          this.optionalRequest('config/read', { cwd: this.options.cwd, includeLayers: false }),
+          this.optionalRequest('configRequirements/read', {}),
         ]);
         const modelRows = [...(firstPage.data ?? [])];
         let cursor = firstPage.nextCursor;
@@ -126,11 +143,14 @@ export class CodexRuntime {
         }
         if (this.child !== child) throw new Error("Codex disconnected during initialization");
         this.connected = true;
-        const result = {
+        const result: RuntimeConnection = {
           authenticated: Boolean(account.account) || account.requiresOpenaiAuth === false,
-          models: modelRows.map((model: any) => ({ id: model.model ?? model.id, name: model.displayName ?? model.model ?? model.id })),
+          models: modelRows.map(modelMetadata),
           version,
+          ...(config ? { defaults: settingsDefaults(config.config) } : {}),
+          ...(requirements?.requirements ? { requirements: settingsRequirements(requirements.requirements) } : {}),
         };
+        this.connection = result;
         this.emit("connection.changed", { state: "connected", ...result });
         return result;
       } catch (error) {
@@ -147,16 +167,26 @@ export class CodexRuntime {
     this.opening = true;
     this.canvasToolsReady = false;
     try {
+      const requestedSettings = structuredClone(this.options.settings?.() ?? { ...defaultAgentSettings(), model: this.options.model ?? '' });
+      const settings = inheritedSettings(requestedSettings, this.connection);
+      const compatibilityError = settingsCompatibilityError(settings, this.connection?.models ?? [], this.connection?.requirements);
+      if (compatibilityError) throw new Error(compatibilityError);
+      const config = threadConfig(settings, this.options.canvasMcp);
+      const developerInstructions = [this.options.developerInstructions, settings.additionalInstructions].filter(Boolean).join('\n\n');
+      // Preserve the canvas instructions when an advanced config includes its own value.
+      if (developerInstructions) {
+        setConfigPath(config, 'developer_instructions', developerInstructions);
+        delete config.developer_instructions;
+      }
       const common = {
         cwd: this.options.cwd,
-        ...(this.options.model ? { model: this.options.model } : {}),
-        approvalPolicy: "on-request",
-        sandbox: "workspace-write",
-        ...(this.options.developerInstructions ? { developerInstructions: this.options.developerInstructions } : {}),
-        ...(this.options.canvasMcp ? { config: { [`mcp_servers.${canvasServerName}`]: {
-          url: this.options.canvasMcp.url(), bearer_token_env_var: canvasTokenEnvironment,
-          required: true, startup_timeout_sec: 10, tool_timeout_sec: 30,
-        } } } : {}),
+        ...(settings.model ? { model: settings.model } : {}),
+        ...(settings.serviceTier ? { serviceTier: settings.serviceTier } : {}),
+        ...(settings.approvalPolicy ? { approvalPolicy: settings.approvalPolicy } : {}),
+        ...(settings.approvalsReviewer ? { approvalsReviewer: settings.approvalsReviewer } : {}),
+        ...(settings.sandboxMode ? { sandbox: settings.sandboxMode } : {}),
+        ...(developerInstructions ? { developerInstructions } : {}),
+        ...(Object.keys(config).length ? { config } : {}),
       };
       const response = threadId
         ? await this.request("thread/resume", { ...common, threadId })
@@ -168,6 +198,11 @@ export class CodexRuntime {
       if (typeof response.thread?.id !== "string") throw new Error("Codex returned a thread without an ID");
       if (threadId && response.thread.id !== threadId) throw new Error('Codex returned a different conversation while resuming; the saved binding was retained.');
       this.threadId = response.thread.id;
+      this.openedSettings = settings;
+      this.effectiveModel = settings.model || response.model || null;
+      if (!this.effectiveModel) this.effectiveModel = this.connection?.defaults?.model || this.connection?.models.find(model => model.isDefault)?.id || this.connection?.models[0]?.id || null;
+      this.effectiveEffort = settings.reasoningEffort || response.reasoningEffort || this.connection?.defaults?.reasoningEffort || null;
+      this.effectiveSandbox = response.sandbox ?? null;
       this.activeTurnId = response.thread.turns?.find((turn: any) => turn.status === "inProgress")?.id ?? null;
       if (this.options.canvasMcp) {
         const inventory = await this.request('mcpServerStatus/list', { threadId: this.threadId, serverName: canvasServerName });
@@ -195,6 +230,7 @@ export class CodexRuntime {
         threadId: this.threadId,
         input: textInput(text),
         ...(requestId ? { clientUserMessageId: requestId } : {}),
+        ...turnSettings(this.openedSettings, this.effectiveModel, this.effectiveEffort, this.effectiveSandbox, this.connection?.defaults),
       });
       if (typeof response.turn?.id !== "string") {
         this.uncertainSubmission = true;
@@ -261,6 +297,17 @@ export class CodexRuntime {
         reject(new RuntimeRequestError(errorMessage(error), method, true));
       }
     });
+  }
+
+  private async optionalRequest(method: string, params: any): Promise<any | undefined> {
+    try {
+      return await this.request(method, params);
+    } catch (error) {
+      // Older app servers lack these metadata methods. Other failures can carry
+      // managed-policy or configuration errors and must remain visible.
+      if (error instanceof RuntimeRequestError && error.code === -32601) return undefined;
+      throw error;
+    }
   }
 
   private write(message: any): void {
@@ -389,4 +436,165 @@ function textInput(text: string) {
 
 function errorMessage(error: unknown): string {
   return (error instanceof Error ? error.message : String(error)).slice(0, 2_000);
+}
+
+function modelMetadata(model: any): AgentModel {
+  const result: AgentModel = { id: model.model ?? model.id, name: model.displayName ?? model.model ?? model.id };
+  if (typeof model.description === 'string') result.description = model.description;
+  if (typeof model.isDefault === 'boolean') result.isDefault = model.isDefault;
+  if (typeof model.defaultReasoningEffort === 'string') result.defaultReasoningEffort = model.defaultReasoningEffort;
+  if (Array.isArray(model.supportedReasoningEfforts)) result.supportedReasoningEfforts = model.supportedReasoningEfforts
+    .filter((entry: any) => typeof entry?.reasoningEffort === 'string')
+    .map((entry: any) => ({ reasoningEffort: entry.reasoningEffort, description: typeof entry.description === 'string' ? entry.description : '' }));
+  if (typeof model.defaultServiceTier === 'string' || model.defaultServiceTier === null) result.defaultServiceTier = model.defaultServiceTier;
+  if (Array.isArray(model.serviceTiers)) result.serviceTiers = model.serviceTiers
+    .filter((entry: any) => typeof entry?.id === 'string' && typeof entry.name === 'string')
+    .map((entry: any) => ({ id: entry.id, name: entry.name, ...(typeof entry.description === 'string' ? { description: entry.description } : {}) }));
+  else if (Array.isArray(model.additionalSpeedTiers)) result.serviceTiers = [
+    { id: 'default', name: 'Standard' },
+    ...model.additionalSpeedTiers.filter((id: unknown) => typeof id === 'string' && id !== 'default').map((id: string) => ({ id, name: id })),
+  ];
+  // Catalog speed lists describe optional accelerated tiers; the standard
+  // service tier remains valid even when it is absent from that list.
+  if (result.serviceTiers && !result.serviceTiers.some(tier => tier.id === 'default')) result.serviceTiers.unshift({ id: 'default', name: 'Standard' });
+  return result;
+}
+
+/** Only expose known settings. Config may contain private provider or MCP credentials. */
+function settingsDefaults(config: any): Partial<AgentSettings> {
+  const result: Partial<AgentSettings> = {};
+  if (!isRecord(config)) return result;
+  for (const [native, local, allowed] of [
+    ['model', 'model', null],
+    ['model_reasoning_effort', 'reasoningEffort', null],
+    ['service_tier', 'serviceTier', null],
+    ['approval_policy', 'approvalPolicy', ['on-request', 'never', 'untrusted']],
+    ['approvals_reviewer', 'approvalsReviewer', ['user', 'auto_review', 'guardian_subagent']],
+    ['sandbox_mode', 'sandboxMode', ['read-only', 'workspace-write', 'danger-full-access']],
+    ['web_search', 'webSearch', ['disabled', 'cached', 'indexed', 'live']],
+    ['model_reasoning_summary', 'reasoningSummary', ['auto', 'concise', 'detailed', 'none']],
+    ['model_verbosity', 'verbosity', ['low', 'medium', 'high']],
+  ] as const) {
+    const value = config[native];
+    if (typeof value === 'string' && (!allowed || (allowed as readonly string[]).includes(value))) (result as Record<string, unknown>)[local] = value;
+  }
+  if (typeof config.sandbox_workspace_write?.network_access === 'boolean') result.networkAccess = config.sandbox_workspace_write.network_access;
+  if (Array.isArray(config.sandbox_workspace_write?.writable_roots)) result.writableRoots = config.sandbox_workspace_write.writable_roots.filter((root: unknown) => typeof root === 'string');
+  return result;
+}
+
+function settingsRequirements(requirements: any): SettingsRequirements {
+  const result: SettingsRequirements = {};
+  for (const key of ['allowedApprovalPolicies', 'allowedApprovalsReviewers', 'allowedSandboxModes', 'allowedWebSearchModes'] as const) {
+    if (Array.isArray(requirements[key])) result[key] = requirements[key].filter((value: unknown) => typeof value === 'string');
+  }
+  return result;
+}
+
+/** Resume can retain historical values when overrides are absent. Resolve the
+ * requested inheritance explicitly while leaving persisted/UI settings alone. */
+function inheritedSettings(requested: AgentSettings, connection: RuntimeConnection | null): AgentSettings {
+  const result = structuredClone(requested);
+  const defaults = connection?.defaults;
+  const overrides = requested.configOverrides;
+  for (const [local, native] of [
+    ['approvalPolicy', 'approval_policy'], ['approvalsReviewer', 'approvals_reviewer'],
+    ['sandboxMode', 'sandbox_mode'], ['webSearch', 'web_search'],
+    ['reasoningSummary', 'model_reasoning_summary'], ['verbosity', 'model_verbosity'],
+  ] as const) {
+    if (!requested[local] && !Object.hasOwn(overrides, native) && defaults?.[local]) (result as Record<string, unknown>)[local] = defaults[local];
+  }
+  const inherit = (local: 'model' | 'reasoningEffort' | 'serviceTier', native: string, fallback?: string | null): void => {
+    if (requested[local]) return;
+    if (Object.hasOwn(overrides, native)) {
+      if (typeof overrides[native] === 'string') result[local] = overrides[native];
+    } else if (fallback) result[local] = fallback;
+  };
+  inherit('model', 'model', defaults?.model || connection?.models.find(model => model.isDefault)?.id);
+  const model = connection?.models.find(model => model.id === result.model);
+  let effort = defaults?.reasoningEffort;
+  if (effort && model?.supportedReasoningEfforts?.length && !model.supportedReasoningEfforts.some(option => option.reasoningEffort === effort)) effort = undefined;
+  inherit('reasoningEffort', 'model_reasoning_effort', effort || model?.defaultReasoningEffort);
+  let tier = defaults?.serviceTier ? serviceTierForModel(model, defaults.serviceTier) : undefined;
+  if (tier && model?.serviceTiers?.length && !model.serviceTiers.some(option => option.id === tier)) tier = undefined;
+  inherit('serviceTier', 'service_tier', tier || model?.defaultServiceTier || (defaults ? 'default' : undefined));
+  result.serviceTier = serviceTierForModel(model, result.serviceTier);
+  return result;
+}
+
+function threadConfig(settings: AgentSettings, canvasMcp: RuntimeOptions['canvasMcp']): Record<string, any> {
+  const config: Record<string, any> = structuredClone(settings.configOverrides);
+  for (const [native, value] of [
+    ['model', settings.model], ['service_tier', settings.serviceTier], ['approval_policy', settings.approvalPolicy],
+    ['approvals_reviewer', settings.approvalsReviewer], ['sandbox_mode', settings.sandboxMode],
+  ] as const) if (value) {
+    setConfigPath(config, native, value);
+    delete config[native]; // The dedicated top-level protocol field has precedence.
+  }
+  for (const [native, value] of [
+    ['model_reasoning_effort', settings.reasoningEffort], ['model_reasoning_summary', settings.reasoningSummary],
+    ['model_verbosity', settings.verbosity], ['web_search', settings.webSearch],
+  ] as const) if (value) setConfigPath(config, native, value);
+  if (settings.networkAccess !== null) setConfigPath(config, 'sandbox_workspace_write.network_access', settings.networkAccess);
+  if (settings.writableRoots.length) setConfigPath(config, 'sandbox_workspace_write.writable_roots', settings.writableRoots);
+  if (canvasMcp) setConfigPath(config, `mcp_servers.${canvasServerName}`, {
+    url: canvasMcp.url(), bearer_token_env_var: canvasTokenEnvironment,
+    required: true, startup_timeout_sec: 10, tool_timeout_sec: 30,
+  });
+  return config;
+}
+
+/** Remove both nested and dotted collisions before writing a native config key. */
+function setConfigPath(config: Record<string, any>, path: string, value: unknown): void {
+  for (const key of Object.keys(config)) {
+    if (key === path || key.startsWith(`${path}.`)) delete config[key];
+    else if (path.startsWith(`${key}.`)) {
+      const nested = config[key];
+      delete config[key];
+      // Avoid overlapping parent/child overrides: their native map iteration
+      // order need not match JavaScript insertion order.
+      const preserveSiblings = (prefix: string, object: Record<string, any>): void => {
+        for (const [child, childValue] of Object.entries(object)) {
+          const childPath = `${prefix}.${child}`;
+          if (childPath === path || childPath.startsWith(`${path}.`)) continue;
+          if (path.startsWith(`${childPath}.`)) {
+            if (isRecord(childValue)) preserveSiblings(childPath, childValue);
+          } else if (!Object.hasOwn(config, childPath)) config[childPath] = childValue;
+        }
+      };
+      if (isRecord(nested)) preserveSiblings(key, nested);
+    }
+  }
+  config[path] = value;
+}
+
+function turnSettings(settings: AgentSettings | null, model: string | null, effort: string | null, sandbox: any, defaults?: Partial<AgentSettings>): Record<string, any> {
+  if (!settings) return {};
+  const result: Record<string, any> = {};
+  if (settings.model) result.model = settings.model;
+  if (settings.serviceTier) result.serviceTier = settings.serviceTier;
+  if (settings.reasoningEffort) result.effort = settings.reasoningEffort;
+  if (settings.reasoningSummary) result.summary = settings.reasoningSummary;
+  if (settings.approvalPolicy) result.approvalPolicy = settings.approvalPolicy;
+  if (settings.approvalsReviewer) result.approvalsReviewer = settings.approvalsReviewer;
+  if (model) result.collaborationMode = { mode: settings.collaborationMode, settings: { model, reasoning_effort: effort, developer_instructions: null } };
+  else if (settings.collaborationMode === 'plan') throw new Error('Select a model before starting Plan mode.');
+
+  const inheritedMode = sandbox?.type === 'workspaceWrite' ? 'workspace-write' : sandbox?.type === 'readOnly' ? 'read-only' : sandbox?.type === 'dangerFullAccess' ? 'danger-full-access' : defaults?.sandboxMode;
+  const mode = settings.sandboxMode || inheritedMode;
+  if (settings.sandboxMode || settings.networkAccess !== null || settings.writableRoots.length) {
+    const networkAccess = settings.networkAccess ?? sandbox?.networkAccess ?? defaults?.networkAccess ?? false;
+    if (mode === 'workspace-write') result.sandboxPolicy = {
+      type: 'workspaceWrite', networkAccess,
+      writableRoots: settings.writableRoots.length ? settings.writableRoots : sandbox?.writableRoots ?? defaults?.writableRoots ?? [],
+      excludeTmpdirEnvVar: sandbox?.excludeTmpdirEnvVar ?? false, excludeSlashTmp: sandbox?.excludeSlashTmp ?? false,
+    };
+    else if (mode === 'read-only') result.sandboxPolicy = { type: 'readOnly', networkAccess };
+    else if (mode === 'danger-full-access') result.sandboxPolicy = { type: 'dangerFullAccess' };
+  }
+  return result;
+}
+
+function isRecord(value: unknown): value is Record<string, any> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }

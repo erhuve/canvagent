@@ -1,3 +1,5 @@
+import type { AgentModel, AgentSettings, SettingsRequirements } from './settings.js';
+
 export type JsonObject = Record<string, any>;
 export interface Message {
   id: string;
@@ -27,6 +29,7 @@ export interface Approval {
   params: JsonObject;
 }
 export interface Session {
+  settings?: AgentSettings;
   id: string;
   title: string;
   threadId: string | null;
@@ -53,8 +56,11 @@ export interface RuntimeState {
   connected: boolean;
   authenticated: boolean;
   version: string;
-  models: { id: string; name: string }[];
+  models: AgentModel[];
   model: string;
+  settings: AgentSettings;
+  defaults?: Partial<AgentSettings>;
+  requirements?: SettingsRequirements;
   error?: string;
   capabilities: { steering: boolean; canvasChangeNotices: boolean; canvasTools: boolean };
 }

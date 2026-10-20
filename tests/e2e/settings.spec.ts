@@ -1,0 +1,170 @@
+import { expect, test, type Page } from '@playwright/test';
+
+async function state(page: Page) { return page.evaluate(async () => (await fetch('/api/state')).json()); }
+async function activeSession(page: Page) {
+  const saved = await state(page);
+  return saved.sessions.find((session: any) => session.id === saved.activeSessionId);
+}
+async function newConversation(page: Page) {
+  const previous = (await state(page)).activeSessionId;
+  await page.getByRole('button', { name: 'New conversation', exact: true }).click();
+  await expect.poll(async () => (await state(page)).activeSessionId).not.toBe(previous);
+  return (await state(page)).activeSessionId;
+}
+async function prepare(page: Page) {
+  await page.goto('/');
+  await newConversation(page);
+  const connect = page.getByRole('button', { name: 'Connect Codex', exact: true });
+  if (await connect.isVisible()) await connect.click();
+  await expect(page.getByRole('button', { name: 'Codex connected', exact: true })).toBeVisible();
+}
+async function openSettings(page: Page) {
+  await page.getByRole('button', { name: 'Codex settings', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Codex settings', exact: true });
+  await expect(dialog).toBeVisible();
+  return dialog;
+}
+
+test('settings belong to each conversation and survive navigation and reload', async ({ page }) => {
+  await prepare(page);
+  const firstId = (await state(page)).activeSessionId;
+  const input = page.getByRole('textbox', { name: 'Message Codex' });
+  const firstTitle = '[chat] Remember my first conversation settings.';
+  await input.fill(firstTitle);
+  await input.press('Enter');
+  await expect.poll(async () => (await activeSession(page)).status).toBe('idle');
+  await page.getByRole('combobox', { name: 'Agent model', exact: true }).selectOption('browser-fixture');
+  await page.getByRole('combobox', { name: 'Thinking level', exact: true }).selectOption('high');
+  await page.getByRole('combobox', { name: 'Speed', exact: true }).selectOption('fast');
+  const dialog = await openSettings(page);
+  await dialog.getByRole('combobox', { name: 'Approval policy', exact: true }).selectOption('never');
+  await dialog.getByRole('combobox', { name: 'Approval reviewer', exact: true }).selectOption('auto_review');
+  await dialog.getByRole('combobox', { name: 'Sandbox access', exact: true }).selectOption('read-only');
+  await dialog.getByRole('combobox', { name: 'Network access', exact: true }).selectOption('false');
+  await dialog.getByRole('combobox', { name: 'Web search', exact: true }).selectOption('cached');
+  await dialog.getByRole('combobox', { name: 'Reasoning summaries', exact: true }).selectOption('concise');
+  await dialog.getByRole('combobox', { name: 'Response verbosity', exact: true }).selectOption('low');
+  await dialog.getByRole('textbox', { name: 'Additional writable roots', exact: false }).fill('/tmp/extra-root\n/tmp/another-root');
+  await dialog.getByRole('textbox', { name: 'Additional instructions', exact: false }).fill('Keep responses focused on this project.');
+  await dialog.getByRole('textbox', { name: 'Advanced Codex configuration (JSON)', exact: false }).fill('{"model_context_window": 200000}');
+  await dialog.getByRole('button', { name: 'Save settings', exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  expect((await activeSession(page)).settings).toMatchObject({ model: 'browser-fixture', reasoningEffort: 'high', serviceTier: 'fast', approvalPolicy: 'never', approvalsReviewer: 'auto_review', sandboxMode: 'read-only', networkAccess: false, webSearch: 'cached', reasoningSummary: 'concise', verbosity: 'low', writableRoots: ['/tmp/extra-root', '/tmp/another-root'], additionalInstructions: 'Keep responses focused on this project.', configOverrides: { model_context_window: 200000 } });
+  const secondId = await newConversation(page);
+  expect(secondId).not.toBe(firstId);
+  expect((await activeSession(page)).settings.reasoningEffort).not.toBe('high');
+  await page.getByRole('combobox', { name: 'Agent model', exact: true }).selectOption('browser-light');
+  await page.getByRole('combobox', { name: 'Thinking level', exact: true }).selectOption('low');
+  await page.getByRole('button', { name: `Open conversation: ${firstTitle}`, exact: true }).click();
+  await expect(page.getByRole('combobox', { name: 'Thinking level', exact: true })).toHaveValue('high');
+  await expect(page.getByRole('combobox', { name: 'Speed', exact: true })).toHaveValue('fast');
+  await page.reload();
+  await expect(page.getByRole('combobox', { name: 'Agent model', exact: true })).toHaveValue('browser-fixture');
+  expect((await activeSession(page)).settings.configOverrides).toEqual({ model_context_window: 200000 });
+  expect((await state(page)).sessions.find((session: any) => session.id === secondId).settings).toMatchObject({ model: 'browser-light', reasoningEffort: 'low' });
+});
+
+test('a working conversation can save settings for its next turn and still run other conversations', async ({ page }) => {
+  await prepare(page);
+  const firstId = (await state(page)).activeSessionId;
+  const title = '[chat] Keep working while I change next-turn settings.';
+  const input = page.getByRole('textbox', { name: 'Message Codex' });
+  await input.fill(title);
+  await input.press('Enter');
+  await expect(page.getByRole('button', { name: 'Stop agent' })).toBeVisible();
+  const turnId = (await activeSession(page)).turnId;
+  const dialog = await openSettings(page);
+  await expect(dialog).toContainText('The current turn keeps its settings.');
+  await dialog.getByRole('combobox', { name: 'Model', exact: true }).selectOption('browser-light');
+  await dialog.getByRole('combobox', { name: 'Thinking', exact: true }).selectOption('low');
+  await dialog.getByRole('combobox', { name: 'Collaboration mode', exact: true }).selectOption('plan');
+  await dialog.getByRole('textbox', { name: 'Additional instructions', exact: false }).fill('Plan the next turn before editing.');
+  await dialog.getByRole('button', { name: 'Save settings', exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  expect((await activeSession(page))).toMatchObject({ turnId, status: 'running', settings: { model: 'browser-light', reasoningEffort: 'low', collaborationMode: 'plan', additionalInstructions: 'Plan the next turn before editing.' } });
+  const secondId = await newConversation(page);
+  await input.fill('[chat] Keep working in a second conversation.');
+  await input.press('Enter');
+  await expect.poll(async () => (await state(page)).sessions.filter((session: any) => [firstId, secondId].includes(session.id)).map((session: any) => session.status)).toEqual(['running', 'running']);
+  await page.getByRole('button', { name: 'Stop agent' }).click();
+  await page.getByRole('button', { name: `Open conversation: ${title}`, exact: true }).click();
+  await expect(page.getByRole('combobox', { name: 'Agent model', exact: true })).toHaveValue('browser-light');
+  await page.getByRole('button', { name: 'Stop agent' }).click();
+  await input.fill('[chat] Use the saved next-turn settings.');
+  await input.press('Enter');
+  await expect.poll(async () => (await activeSession(page)).status).toBe('idle');
+  expect((await activeSession(page)).settings.collaborationMode).toBe('plan');
+});
+
+test('malformed advanced configuration keeps every form edit available to repair', async ({ page }) => {
+  await prepare(page);
+  const before = (await activeSession(page)).settings;
+  const dialog = await openSettings(page);
+  await dialog.getByRole('textbox', { name: 'Additional instructions', exact: false }).fill('Do not lose this unsaved instruction.');
+  const json = dialog.getByRole('textbox', { name: 'Advanced Codex configuration (JSON)', exact: false });
+  await json.fill('{"broken":');
+  await dialog.getByRole('button', { name: 'Save settings', exact: true }).click();
+  await expect(dialog.getByRole('alert')).toContainText('Advanced configuration is invalid');
+  await expect(json).toBeFocused();
+  await expect(json).toHaveValue('{"broken":');
+  await expect(dialog.getByRole('textbox', { name: 'Additional instructions', exact: false })).toHaveValue('Do not lose this unsaved instruction.');
+  expect((await activeSession(page)).settings).toEqual(before);
+  await json.fill('{"model_context_window": 180000}');
+  await dialog.getByRole('button', { name: 'Save settings', exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  expect((await activeSession(page)).settings).toMatchObject({ additionalInstructions: 'Do not lose this unsaved instruction.', configOverrides: { model_context_window: 180000 } });
+});
+
+test('model switching uses the advertised thinking and speed catalogs', async ({ page }) => {
+  await prepare(page);
+  const model = page.getByRole('combobox', { name: 'Agent model', exact: true });
+  const effort = page.getByRole('combobox', { name: 'Thinking level', exact: true });
+  const speed = page.getByRole('combobox', { name: 'Speed', exact: true });
+  await model.selectOption('browser-fixture');
+  await effort.selectOption('high');
+  await speed.selectOption('fast');
+  await model.selectOption('browser-light');
+  await expect(effort).toHaveValue('');
+  await expect(speed).toHaveValue('');
+  await expect(effort.locator('option[value=high]')).toHaveCount(0);
+  await expect(effort.locator('option[value=low]')).toHaveCount(1);
+  await expect(speed.locator('option[value=fast]')).toHaveCount(0);
+  const customModel = 'custom-local-model';
+  const id = (await state(page)).activeSessionId;
+  const saved = await page.request.post(`/api/sessions/${id}/settings`, { data: { model: customModel } });
+  expect(saved.ok()).toBe(true);
+  await page.reload();
+  await expect(model).toHaveValue(customModel);
+  await expect(model.locator(`option[value=${customModel}]`)).toHaveText(customModel);
+});
+
+test('saving defaults affects new conversations, and the settings dialog fits mobile and closes with Escape', async ({ page }) => {
+  await prepare(page);
+  const original = (await state(page)).runtime.settings;
+  const firstId = (await state(page)).activeSessionId;
+  const firstSettings = (await activeSession(page)).settings;
+  try {
+    await page.setViewportSize({ width: 390, height: 844 });
+    const dialog = await openSettings(page);
+    await dialog.getByRole('combobox', { name: 'Model', exact: true }).selectOption('browser-light');
+    await dialog.getByRole('combobox', { name: 'Thinking', exact: true }).selectOption('low');
+    await dialog.getByRole('button', { name: 'Save as defaults', exact: true }).click();
+    await expect(dialog.getByRole('status')).toHaveText('Defaults saved for new conversations.');
+    expect((await activeSession(page)).settings).toEqual(firstSettings);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    const bounds = await dialog.boundingBox();
+    expect(bounds?.x).toBeGreaterThanOrEqual(0);
+    expect((bounds?.x ?? 0) + (bounds?.width ?? 0)).toBeLessThanOrEqual(390);
+    await page.keyboard.press('Escape');
+    await expect(dialog).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Codex settings', exact: true })).toBeFocused();
+    await page.getByRole('button', { name: 'Open conversation history', exact: true }).click();
+    const nextId = await newConversation(page);
+    expect(nextId).not.toBe(firstId);
+    await expect(page.getByRole('combobox', { name: 'Agent model', exact: true })).toHaveValue('browser-light');
+    await expect(page.getByRole('combobox', { name: 'Thinking level', exact: true })).toHaveValue('low');
+  } finally {
+    const restored = await page.request.post('/api/settings', { data: original });
+    expect(restored.ok()).toBe(true);
+  }
+});

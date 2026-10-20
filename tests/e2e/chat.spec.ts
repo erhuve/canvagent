@@ -115,3 +115,70 @@ test('mobile navigation keeps the canvas mounted and the conversation drawer usa
   await expect(page.getByRole('button', { name: 'Close conversation history', exact: true })).toHaveCount(0);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
+
+test('running conversations allow navigation, parallel work, separate drafts and independent stops', async ({ page }) => {
+  await page.goto('/');
+  const firstId = await newConversation(page);
+  await connect(page);
+  const input = page.getByRole('textbox', { name: 'Message Codex' });
+  const firstTitle = '[chat] Keep working on the first task.';
+  const secondTitle = '[chat] Keep working on the second task.';
+  await input.fill(firstTitle);
+  await input.press('Enter');
+  await expect(page.getByRole('button', { name: 'Stop agent' })).toBeVisible();
+  await input.fill('Unsent first-thread update');
+  const secondId = await newConversation(page);
+  await expect(input).toHaveValue('');
+  await input.fill(secondTitle);
+  await input.press('Enter');
+  await expect.poll(async () => (await state(page)).sessions.filter((s: any) => [firstId, secondId].includes(s.id)).map((s: any) => s.status)).toEqual(['running', 'running']);
+  await expect(page.locator('.thread-run-status[aria-label="Working"]')).toHaveCount(2);
+  await input.fill('Unsent second-thread update');
+  await page.getByRole('button', { name: `Open conversation: ${firstTitle}`, exact: true }).click();
+  await expect(input).toHaveValue('Unsent first-thread update');
+  await input.press('Enter');
+  await expect(input).toHaveValue('');
+  await expect(page.getByText('Update received by the active turn.', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Stop agent' }).click();
+  await expect.poll(async () => (await state(page)).sessions.find((s: any) => s.id === firstId).status).toBe('idle');
+  expect((await state(page)).sessions.find((s: any) => s.id === secondId).status).toBe('running');
+  await page.getByRole('button', { name: `Open conversation: ${secondTitle}`, exact: true }).click();
+  await expect(input).toHaveValue('Unsent second-thread update');
+  await expect(page.getByText('Update received by the active turn.', { exact: true })).toHaveCount(0);
+  await page.reload();
+  await expect(page.getByRole('button', { name: 'Stop agent' })).toBeVisible();
+  await page.getByRole('button', { name: 'Stop agent' }).click();
+  await expect.poll(async () => (await state(page)).sessions.find((s: any) => s.id === secondId).status).toBe('idle');
+});
+
+test('a pending send in the background does not lock another composer or restore into its draft', async ({ page }) => {
+  await page.goto('/');
+  const firstId = await newConversation(page);
+  await connect(page);
+  const input = page.getByRole('textbox', { name: 'Message Codex' });
+  const firstTitle = '[chat] Prepare the background conversation.';
+  await input.fill(firstTitle);
+  await input.press('Enter');
+  await expect.poll(async () => (await state(page)).sessions.find((s: any) => s.id === firstId).status).toBe('idle');
+  let release: (() => void) | undefined;
+  await page.route(`**/api/sessions/${firstId}/messages`, async route => {
+    await new Promise<void>(resolve => { release = resolve; });
+    await route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'Background send failed.' }) });
+  });
+  await input.fill('Failed background message');
+  await input.press('Enter');
+  await expect.poll(() => !!release).toBe(true);
+  try {
+    const secondId = await newConversation(page);
+    await input.fill('[chat] A parallel submission.');
+    await input.press('Enter');
+    await expect.poll(async () => (await state(page)).sessions.find((s: any) => s.id === secondId).messages.some((m: any) => m.role === 'assistant')).toBe(true);
+    await input.fill('Second conversation draft');
+    release!();
+    await expect(page.getByText('Background send failed.', { exact: true })).toBeVisible();
+    await expect(input).toHaveValue('Second conversation draft');
+    await page.getByRole('button', { name: `Open conversation: ${firstTitle}`, exact: true }).click();
+    await expect.poll(async () => (await state(page)).activeSessionId).toBe(firstId);
+    await expect(input).toHaveValue('Failed background message');
+  } finally { release?.(); }
+});

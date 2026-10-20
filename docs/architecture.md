@@ -6,9 +6,9 @@ This is the proposed v1 design. The [roadmap](roadmap.md) grows a small working 
 
 ## Scope and deployment
 
-Run one local Node.js service and open its React interface in a browser. The service starts a pinned Codex app-server subprocess over stdio. Use TypeScript across Canvagent.
+Run one local Node.js service and open its React interface in a browser. The service lazily starts a Codex app-server subprocess over stdio for each conversation that connects or sends work. Use TypeScript across Canvagent.
 
-V1 supports one open project, one board per project, one active agent turn, and one editing browser connection. Projects can have multiple saved sessions; each session is associated with that project's board. Reopening an old session shows the current board and its intervening changes. Historical board revisions are read-only context, rather than an automatic rollback.
+V1 supports one open project, one board per project, parallel conversations with one active agent turn per conversation, and one editing browser connection. Runtime connections, dispatch queues, approvals, and coalesced canvas notices belong to individual sessions. Navigation does not stop background work. Projects can have multiple saved sessions; each session is associated with that project's board. Reopening an old session shows the current board and its intervening changes. Historical board revisions are read-only context, rather than an automatic rollback.
 
 Use SQLite for application metadata, board snapshots, operation receipts, and durable event records, plus a local managed directory for image and artifact bytes. Provider conversation history remains owned by Codex; Canvagent stores the provider thread reference and the UI records it needs. Storage lives in the user's application data directory, separate from project source files.
 

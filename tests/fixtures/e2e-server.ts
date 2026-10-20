@@ -16,12 +16,19 @@ function textResult(result: any) {
 class BrowserFixtureRuntime {
   threadId: string | null = null;
   activeTurnId: string | null = null;
-  private sequence = 0;
   private approvalId: string | undefined;
   private canvasClient: Client | undefined;
   constructor(private options: RuntimeOptions) {}
   async connect() {
-    return { authenticated: true, version: 'browser-test-fixture', models: [{ id: 'browser-fixture', name: 'Browser fixture' }] };
+    return { authenticated: true, version: 'browser-test-fixture',
+      defaults: { model: 'browser-fixture', reasoningEffort: 'medium', serviceTier: 'default' },
+      models: [{ id: 'browser-fixture', name: 'Browser fixture', isDefault: true, defaultReasoningEffort: 'medium',
+        supportedReasoningEfforts: [{ reasoningEffort: 'low', description: 'Quick tasks' }, { reasoningEffort: 'medium', description: 'Balanced' }, { reasoningEffort: 'high', description: 'Deeper thinking' }],
+        defaultServiceTier: 'default', serviceTiers: [{ id: 'default', name: 'Standard' }, { id: 'fast', name: 'Fast' }] },
+      { id: 'browser-light', name: 'Browser light', defaultReasoningEffort: 'low',
+        supportedReasoningEfforts: [{ reasoningEffort: 'low', description: 'Lightweight thinking' }],
+        defaultServiceTier: 'default', serviceTiers: [{ id: 'default', name: 'Standard' }] }],
+    };
   }
   async open(threadId?: string) {
     await this.canvasClient?.close();
@@ -44,7 +51,7 @@ class BrowserFixtureRuntime {
       : { type: 'inputText', text: item.text }) };
   }
   async start(text: string) {
-    const turnId = `browser-turn-${++this.sequence}`;
+    const turnId = `browser-turn-${randomUUID()}`;
     this.activeTurnId = turnId;
     this.options.onEvent({ type: 'turn/started', payload: { threadId: this.threadId, turn: { id: turnId } } });
     setTimeout(() => void this.run(text, turnId), 30);

@@ -7,6 +7,7 @@ import { desktopInvoke, hasDesktopBridge } from "./desktop";
 import { useBoard } from "./useBoard";
 import type { AppState, Approval } from "./types";
 import { canAcceptEmptyElicitation } from "../shared/elicitation";
+import type { AgentSettings } from "../shared/settings";
 
 function ApprovalCard({ approval, sessionId, onError }: { approval: Approval; sessionId: string; onError: (message: string) => void }) {
   const [deciding, setDeciding] = useState(false);
@@ -40,15 +41,15 @@ export default function App() {
   const [initialError, setInitialError] = useState("");
   const [toast, setToast] = useState("");
   const [draftRequest, setDraftRequest] = useState<{ id: number; text: string }>();
-  const [sending, setSending] = useState(false);
+  const [sendingIds, setSendingIds] = useState<Set<string>>(new Set());
   const [connecting, setConnecting] = useState(false);
+  const [settingsSaving, setSettingsSaving] = useState(false);
   const [sessionBusy, setSessionBusy] = useState(false);
-  const [notice, setNotice] = useState("");
+  const [notices, setNotices] = useState<Record<string, { id: string; text: string }>>({});
   const toastTimer = useRef<ReturnType<typeof setTimeout>>();
-  const sendingRef = useRef(false);
+  const sendingRef = useRef(new Set<string>());
   const desktopBusy = useRef(false);
-  const lastNotice = useRef("");
-  const submission = useRef<{ key: string; requestId: string }>();
+  const submissions = useRef(new Map<string, { key: string; requestId: string }>());
   const notify = useCallback((message: string) => {
     setToast(message);
     clearTimeout(toastTimer.current);
@@ -86,13 +87,13 @@ export default function App() {
           if (message.type === "state") applyState(message.state);
           else if (message.type === "board") boardReceiver.current(message.board, message.mutation);
           else if (message.type === "runtime") setState(previous => previous ? { ...previous, runtime: message.runtime } : previous);
-          else if (message.type === "session") { const activity = [...(message.session.activities || [])].reverse().find((entry: any) => entry.kind === "canvas" && entry.title?.startsWith("Canvas revision")); if (activity && lastNotice.current !== activity.id) { lastNotice.current = activity.id; setNotice(activity.title); } setState(previous => {
+          else if (message.type === "session") { const activity = [...(message.session.activities || [])].reverse().find((entry: any) => entry.kind === "canvas" && entry.title?.startsWith("Canvas revision")); if (activity) setNotices(previous => previous[message.session.id]?.id === activity.id ? previous : { ...previous, [message.session.id]: { id: activity.id, text: activity.title } }); setState(previous => {
             if (!previous) return previous;
             const exists = previous.sessions.some(session => session.id === message.session.id);
             return { ...previous, sessions: exists ? previous.sessions.map(session => session.id === message.session.id ? message.session : session) : [...previous.sessions, message.session], activeSessionId: message.activeSessionId ?? previous.activeSessionId };
           }); }
           else if (message.type === "capture") void captureHandler.current(message);
-          else if (message.type === "notice" || message.type === "canvas_notice") setNotice(message.message || message.text || "Canvas changes shared with the agent.");
+          else if (message.type === "notice" || message.type === "canvas_notice") notify(message.message || message.text || "Canvas changes shared with the agent.");
           else if (message.type === "artifacts") setState(previous => previous ? { ...previous, artifacts: message.artifacts } : previous);
         } catch { /* Ignore malformed events; reconnect always obtains a full snapshot. */ }
       };
@@ -105,7 +106,7 @@ export default function App() {
     };
     void boot();
     return () => { disposed = true; clearTimeout(reconnect); socket?.close(); };
-  }, [applyState]);
+  }, [applyState, notify]);
 
   useEffect(() => {
     const warn = (event: BeforeUnloadEvent) => {
@@ -116,10 +117,9 @@ export default function App() {
   }, [canvas.saveStatus]);
 
   const session = state?.sessions.find(candidate => candidate.id === state.activeSessionId) || state?.sessions.at(-1);
+  const sending = !!session && sendingIds.has(session.id);
   const currentBoard = canvas.board || state?.board;
   const visibleElementCount = canvas.elementCount;
-
-  useEffect(() => { setNotice(""); }, [session?.id]);
 
   const refresh = async () => { const incoming = await api<AppState>("/api/state"); applyState(incoming); return incoming; };
 
@@ -146,20 +146,22 @@ export default function App() {
 
   const send = async (text: string) => {
     if (!text.trim()) return;
-    if (sendingRef.current) throw new Error("A message is already being submitted. Try again in a moment.");
     if (!online) throw new Error("Reconnect to the local service before sending.");
-    sendingRef.current = true;
-    setSending(true);
+    let target = session;
+    if (!target) target = await createSession();
+    if (!target) throw new Error("Could not open a conversation. Your message is still available to retry.");
+    const targetId = target.id;
+    const selectedIds = [...canvas.selectedIds];
+    if (sendingRef.current.has(targetId)) throw new Error("A message is already being submitted in this conversation. Try again in a moment.");
+    sendingRef.current.add(targetId);
+    setSendingIds(new Set(sendingRef.current));
     try {
       if (!await canvas.flush()) throw new Error("Your message is ready. Resolve the canvas save first so the agent receives the right version.");
-      let target = session;
-      if (!target) target = await createSession();
-      if (!target) throw new Error("Could not open a conversation. Your message is still available to retry.");
-      const key = JSON.stringify([target.id, text.trim(), canvas.selectedIds]);
-      if (submission.current?.key !== key) submission.current = { key, requestId: crypto.randomUUID() };
-      await api(`/api/sessions/${encodeURIComponent(target.id)}/messages`, { text: text.trim(), requestId: submission.current.requestId, selection: { elementIds: canvas.selectedIds } });
-      submission.current = undefined;
-    } finally { sendingRef.current = false; setSending(false); }
+      const key = JSON.stringify([targetId, text.trim(), selectedIds]);
+      if (submissions.current.get(targetId)?.key !== key) submissions.current.set(targetId, { key, requestId: crypto.randomUUID() });
+      await api(`/api/sessions/${encodeURIComponent(targetId)}/messages`, { text: text.trim(), requestId: submissions.current.get(targetId)!.requestId, selection: { elementIds: selectedIds } });
+      submissions.current.delete(targetId);
+    } finally { sendingRef.current.delete(targetId); setSendingIds(new Set(sendingRef.current)); }
   };
 
   const connectRuntime = async () => {
@@ -175,9 +177,22 @@ export default function App() {
     catch (error) { notify(errorMessage(error)); }
   };
 
-  const changeModel = async (model: string) => {
-    try { await api("/api/settings", { model }); await refresh(); }
-    catch (error) { notify(errorMessage(error)); }
+  const changeSettings = async (settings: AgentSettings) => {
+    if (!session) throw new Error("Open a conversation before changing settings.");
+    const targetId = session.id;
+    setSettingsSaving(true);
+    try {
+      const updated = await api<AppState['sessions'][number]>(`/api/sessions/${encodeURIComponent(targetId)}/settings`, settings);
+      setState(previous => previous ? { ...previous, sessions: previous.sessions.map(item => item.id === targetId ? { ...item, settings: updated.settings } : item) } : previous);
+    } finally { setSettingsSaving(false); }
+  };
+  const saveDefaultSettings = async (settings: AgentSettings) => {
+    setSettingsSaving(true);
+    try {
+      const runtime = await api<AppState['runtime']>("/api/settings", settings);
+      setState(previous => previous ? { ...previous, runtime: { ...previous.runtime, model: runtime.model, settings: runtime.settings } } : previous);
+      notify("Defaults saved for new conversations.");
+    } finally { setSettingsSaving(false); }
   };
 
   const askSelection = () => {
@@ -188,14 +203,14 @@ export default function App() {
     if (desktopBusy.current || !hasDesktopBridge()) return;
     desktopBusy.current = true;
     try {
-      if (sendingRef.current) throw new Error("Wait for your message to finish submitting before closing this workspace.");
+      if (sendingRef.current.size) throw new Error("Wait for your messages to finish submitting before closing this workspace.");
       if (!await canvas.flush()) throw new Error("Resolve the canvas save before closing this workspace. Your edits are still here.");
-      const active = session && ['starting', 'running', 'awaiting_approval'].includes(session.status);
-      if (active && !window.confirm("Codex is still working. Stop this turn and close the current workspace?")) return;
+      const active = state?.sessions.some(item => ['starting', 'running', 'awaiting_approval'].includes(item.status));
+      if (active && !window.confirm("Codex is still working. Stop all active turns and close the current workspace?")) return;
       await desktopInvoke(command);
     } catch (error) { notify(errorMessage(error)); }
     finally { desktopBusy.current = false; }
-  }, [canvas.flush, session, notify]);
+  }, [canvas.flush, state?.sessions, notify]);
 
   useEffect(() => {
     if (!hasDesktopBridge()) return;
@@ -212,10 +227,11 @@ export default function App() {
   return <>
     <ChatWorkspace
       state={state} online={online} connecting={connecting} sending={sending} sessionBusy={sessionBusy}
-      notice={notice} draftRequest={draftRequest} selectedIds={canvas.selectedIds}
+      notice={session ? notices[session.id]?.text ?? "" : ""} draftRequest={draftRequest} selectedIds={canvas.selectedIds}
       onClearSelection={() => canvas.selectElements([])} onSend={send} onNewSession={createSession}
       onActivateSession={activateSession} onConnect={() => void connectRuntime()} onInterrupt={interrupt}
-      onChangeModel={model => void changeModel(model)} onError={notify} onDismissNotice={() => setNotice("")}
+      onChangeSettings={changeSettings} onSaveDefaultSettings={saveDefaultSettings} settingsSaving={settingsSaving}
+      onError={notify} onDismissNotice={() => { if (session) setNotices(previous => ({ ...previous, [session.id]: { id: previous[session.id]?.id ?? "", text: "" } })); }}
       onOpenWorkspace={() => void desktopAction('choose_workspace')}
       sessionContent={<>
         {session?.pendingApprovals.map(approval => <ApprovalCard key={approval.id} approval={approval} sessionId={session.id} onError={notify} />)}
