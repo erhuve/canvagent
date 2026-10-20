@@ -19,11 +19,41 @@ async function prepare(page: Page) {
   await expect(page.getByRole('button', { name: 'Codex connected', exact: true })).toBeVisible();
 }
 async function openSettings(page: Page) {
-  await page.getByRole('button', { name: 'Codex settings', exact: true }).click();
+  await page.getByRole('button', { name: 'More Codex settings', exact: true }).click();
   const dialog = page.getByRole('dialog', { name: 'Codex settings', exact: true });
   await expect(dialog).toBeVisible();
   return dialog;
 }
+
+test('common settings live in the composer and preserve an unsent draft', async ({ page }) => {
+  await prepare(page);
+  const composer = page.locator('.composer .composer-toolbar');
+  const input = page.getByRole('textbox', { name: 'Message Codex' });
+  const draft = 'Keep this draft while I choose how Codex should work.';
+  await input.fill(draft);
+  for (const name of ['Approval mode', 'Collaboration mode', 'Agent model', 'Thinking level']) {
+    await expect(composer.getByRole('combobox', { name, exact: true })).toBeVisible();
+  }
+  await expect(composer.getByRole('switch', { name: 'Fast mode', exact: true })).toBeVisible();
+  await expect(composer.getByRole('button', { name: 'More Codex settings', exact: true })).toBeVisible();
+  await expect(page.locator('.conversation-header .agent-settings-quick')).toHaveCount(0);
+  await expect(page.locator('.conversation-header').getByRole('combobox')).toHaveCount(0);
+  await expect(page.getByRole('combobox', { name: 'Speed', exact: true })).toHaveCount(0);
+  await composer.getByRole('combobox', { name: 'Approval mode', exact: true }).selectOption('auto-review');
+  await composer.getByRole('combobox', { name: 'Collaboration mode', exact: true }).selectOption('plan');
+  await composer.getByRole('combobox', { name: 'Agent model', exact: true }).selectOption('browser-fixture');
+  await composer.getByRole('combobox', { name: 'Thinking level', exact: true }).selectOption('high');
+  await composer.getByRole('switch', { name: 'Fast mode', exact: true }).click();
+  await expect.poll(async () => (await activeSession(page)).settings).toMatchObject({ model: 'browser-fixture', reasoningEffort: 'high', serviceTier: 'fast', approvalPolicy: 'on-request', approvalsReviewer: 'auto_review', sandboxMode: 'workspace-write', collaborationMode: 'plan' });
+  await expect(input).toHaveValue(draft);
+  const dialog = await openSettings(page);
+  await expect(dialog.getByRole('combobox', { name: 'Collaboration mode', exact: true })).toHaveValue('plan');
+  await dialog.getByRole('combobox', { name: 'Response verbosity', exact: true }).selectOption('low');
+  await dialog.getByRole('button', { name: 'Save settings', exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(input).toHaveValue(draft);
+  expect((await activeSession(page))).toMatchObject({ status: 'idle', turnId: null, messages: [] });
+});
 
 test('settings belong to each conversation and survive navigation and reload', async ({ page }) => {
   await prepare(page);
@@ -35,7 +65,7 @@ test('settings belong to each conversation and survive navigation and reload', a
   await expect.poll(async () => (await activeSession(page)).status).toBe('idle');
   await page.getByRole('combobox', { name: 'Agent model', exact: true }).selectOption('browser-fixture');
   await page.getByRole('combobox', { name: 'Thinking level', exact: true }).selectOption('high');
-  await page.getByRole('combobox', { name: 'Speed', exact: true }).selectOption('fast');
+  await page.getByRole('switch', { name: 'Fast mode', exact: true }).click();
   const dialog = await openSettings(page);
   await dialog.getByRole('combobox', { name: 'Approval policy', exact: true }).selectOption('never');
   await dialog.getByRole('combobox', { name: 'Approval reviewer', exact: true }).selectOption('auto_review');
@@ -57,7 +87,7 @@ test('settings belong to each conversation and survive navigation and reload', a
   await page.getByRole('combobox', { name: 'Thinking level', exact: true }).selectOption('low');
   await page.getByRole('button', { name: `Open conversation: ${firstTitle}`, exact: true }).click();
   await expect(page.getByRole('combobox', { name: 'Thinking level', exact: true })).toHaveValue('high');
-  await expect(page.getByRole('combobox', { name: 'Speed', exact: true })).toHaveValue('fast');
+  await expect(page.getByRole('switch', { name: 'Fast mode', exact: true })).toBeChecked();
   await page.reload();
   await expect(page.getByRole('combobox', { name: 'Agent model', exact: true })).toHaveValue('browser-fixture');
   expect((await activeSession(page)).settings.configOverrides).toEqual({ model_context_window: 200000 });
@@ -73,11 +103,20 @@ test('a working conversation can save settings for its next turn and still run o
   await input.press('Enter');
   await expect(page.getByRole('button', { name: 'Stop agent' })).toBeVisible();
   const turnId = (await activeSession(page)).turnId;
+  await input.fill('Unsent update while changing the next turn.');
+  const composer = page.locator('.composer .composer-toolbar');
+  await expect(composer.getByRole('combobox', { name: 'Agent model', exact: true })).toBeEnabled();
+  await composer.getByRole('combobox', { name: 'Agent model', exact: true }).selectOption('browser-light');
+  await composer.getByRole('combobox', { name: 'Thinking level', exact: true }).selectOption('low');
+  await composer.getByRole('combobox', { name: 'Collaboration mode', exact: true }).selectOption('plan');
+  await expect(input).toHaveValue('Unsent update while changing the next turn.');
+  expect((await activeSession(page))).toMatchObject({ turnId, status: 'running' });
+  expect((await activeSession(page)).messages.filter((message: any) => message.role === 'user')).toHaveLength(1);
   const dialog = await openSettings(page);
   await expect(dialog).toContainText('The current turn keeps its settings.');
-  await dialog.getByRole('combobox', { name: 'Model', exact: true }).selectOption('browser-light');
-  await dialog.getByRole('combobox', { name: 'Thinking', exact: true }).selectOption('low');
-  await dialog.getByRole('combobox', { name: 'Collaboration mode', exact: true }).selectOption('plan');
+  await expect(dialog.getByRole('combobox', { name: 'Model', exact: true })).toHaveValue('browser-light');
+  await expect(dialog.getByRole('combobox', { name: 'Thinking', exact: true })).toHaveValue('low');
+  await expect(dialog.getByRole('combobox', { name: 'Collaboration mode', exact: true })).toHaveValue('plan');
   await dialog.getByRole('textbox', { name: 'Additional instructions', exact: false }).fill('Plan the next turn before editing.');
   await dialog.getByRole('button', { name: 'Save settings', exact: true }).click();
   await expect(dialog).toHaveCount(0);
@@ -89,6 +128,8 @@ test('a working conversation can save settings for its next turn and still run o
   await page.getByRole('button', { name: 'Stop agent' }).click();
   await page.getByRole('button', { name: `Open conversation: ${title}`, exact: true }).click();
   await expect(page.getByRole('combobox', { name: 'Agent model', exact: true })).toHaveValue('browser-light');
+  await expect(page.getByRole('combobox', { name: 'Collaboration mode', exact: true })).toHaveValue('plan');
+  await expect(input).toHaveValue('Unsent update while changing the next turn.');
   await page.getByRole('button', { name: 'Stop agent' }).click();
   await input.fill('[chat] Use the saved next-turn settings.');
   await input.press('Enter');
@@ -119,16 +160,20 @@ test('model switching uses the advertised thinking and speed catalogs', async ({
   await prepare(page);
   const model = page.getByRole('combobox', { name: 'Agent model', exact: true });
   const effort = page.getByRole('combobox', { name: 'Thinking level', exact: true });
-  const speed = page.getByRole('combobox', { name: 'Speed', exact: true });
+  const fast = page.getByRole('switch', { name: 'Fast mode', exact: true });
   await model.selectOption('browser-fixture');
   await effort.selectOption('high');
-  await speed.selectOption('fast');
+  await expect(fast).toBeEnabled();
+  await fast.click();
+  await expect(fast).toBeChecked();
   await model.selectOption('browser-light');
   await expect(effort).toHaveValue('');
-  await expect(speed).toHaveValue('');
+  await expect(fast).not.toBeChecked();
+  await expect(fast).toBeDisabled();
   await expect(effort.locator('option[value=high]')).toHaveCount(0);
   await expect(effort.locator('option[value=low]')).toHaveCount(1);
-  await expect(speed.locator('option[value=fast]')).toHaveCount(0);
+  await model.selectOption('browser-fixture');
+  await expect(fast).toBeEnabled();
   const customModel = 'custom-local-model';
   const id = (await state(page)).activeSessionId;
   const saved = await page.request.post(`/api/sessions/${id}/settings`, { data: { model: customModel } });
@@ -136,6 +181,25 @@ test('model switching uses the advertised thinking and speed catalogs', async ({
   await page.reload();
   await expect(model).toHaveValue(customModel);
   await expect(model.locator(`option[value=${customModel}]`)).toHaveText(customModel);
+});
+
+test('turning Fast mode off explicitly overrides inherited fast configuration', async ({ page }) => {
+  await prepare(page);
+  const dialog = await openSettings(page);
+  await dialog.getByRole('combobox', { name: 'Model', exact: true }).selectOption('browser-fixture');
+  await dialog.getByRole('combobox', { name: 'Speed', exact: true }).selectOption('');
+  await dialog.getByRole('textbox', { name: 'Advanced Codex configuration (JSON)', exact: false }).fill('{"service_tier": "fast"}');
+  await dialog.getByRole('button', { name: 'Save settings', exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  const fast = page.getByRole('switch', { name: 'Fast mode', exact: true });
+  await expect(fast).toBeChecked();
+  await fast.click();
+  await expect(fast).not.toBeChecked();
+  await expect.poll(async () => (await activeSession(page)).settings).toMatchObject({ serviceTier: 'default', configOverrides: { service_tier: 'fast' } });
+  await page.reload();
+  await expect(fast).not.toBeChecked();
+  const saved = await openSettings(page);
+  await expect(saved.getByRole('combobox', { name: 'Speed', exact: true })).toHaveValue('default');
 });
 
 test('saving defaults affects new conversations, and the settings dialog fits mobile and closes with Escape', async ({ page }) => {
@@ -157,7 +221,7 @@ test('saving defaults affects new conversations, and the settings dialog fits mo
     expect((bounds?.x ?? 0) + (bounds?.width ?? 0)).toBeLessThanOrEqual(390);
     await page.keyboard.press('Escape');
     await expect(dialog).toHaveCount(0);
-    await expect(page.getByRole('button', { name: 'Codex settings', exact: true })).toBeFocused();
+    await expect(page.getByRole('button', { name: 'More Codex settings', exact: true })).toBeFocused();
     await page.getByRole('button', { name: 'Open conversation history', exact: true }).click();
     const nextId = await newConversation(page);
     expect(nextId).not.toBe(firstId);

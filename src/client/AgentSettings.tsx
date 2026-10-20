@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import {
   agentSettingsSchema,
   settingsCompatibilityError,
@@ -33,7 +34,8 @@ const displayValue = (value: string) => ({
 } as Record<string, string>)[value] ?? value;
 
 function selectedModel(settings: AgentSettings, models: AgentModel[], defaults?: Partial<AgentSettings>) {
-  const id = settings.model || defaults?.model;
+  const configured = settings.configOverrides.model;
+  const id = settings.model || (typeof configured === "string" ? configured : "") || defaults?.model;
   return id ? models.find(model => model.id === id) : models.find(model => model.isDefault);
 }
 
@@ -153,7 +155,7 @@ function SettingsDialog(props: SettingsProps & { onClose: () => void }) {
   };
 
   return <dialog ref={dialog} className="agent-settings-dialog" aria-labelledby="agent-settings-title" aria-describedby="agent-settings-description" onCancel={event => { event.preventDefault(); props.onClose(); }} onClick={event => { if (event.target === event.currentTarget) props.onClose(); }}>
-    <form onSubmit={event => { event.preventDefault(); void save(false); }}>
+    <form onSubmit={event => { event.preventDefault(); event.stopPropagation(); void save(false); }}>
       <div className="agent-settings-heading"><div><h2 id="agent-settings-title">Codex settings</h2><p id="agent-settings-description">Changes apply to the next turn in this conversation.{props.running ? " The current turn keeps its settings." : ""}</p></div><button className="icon-button" type="button" aria-label="Close settings" onClick={props.onClose}><Icon name="close" size={18} /></button></div>
       <div className="agent-settings-body">
         <p className="agent-settings-hint">Default values inherit your Codex configuration. Managed options are set by your Codex requirements.</p>
@@ -190,18 +192,76 @@ function SettingsDialog(props: SettingsProps & { onClose: () => void }) {
 
 export function AgentSettingsControls(props: SettingsProps) {
   const [open, setOpen] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const changing = useRef(false);
   const options = { settings: props.settings, models: props.models, defaults: props.defaults };
+  const model = selectedModel(props.settings, props.models, props.defaults);
+  const blocked = props.disabled || props.saving || saving;
+  const inheritedValue = (key: keyof AgentSettings, configKey: string, fallback: string) => {
+    const configured = props.settings.configOverrides[configKey];
+    return String(props.settings[key] || (typeof configured === "string" ? configured : "") || props.defaults?.[key] || fallback);
+  };
+  const permissions = {
+    approvalPolicy: inheritedValue("approvalPolicy", "approval_policy", "on-request"),
+    approvalsReviewer: inheritedValue("approvalsReviewer", "approvals_reviewer", "user"),
+    sandboxMode: inheritedValue("sandboxMode", "sandbox_mode", "workspace-write"),
+  };
+  const approvalPresets = [
+    { id: "ask", label: "Ask to approve", approvalPolicy: "on-request", approvalsReviewer: "user", sandboxMode: "workspace-write" },
+    { id: "auto-review", label: "Auto review", approvalPolicy: "on-request", approvalsReviewer: "auto_review", sandboxMode: "workspace-write" },
+    { id: "read-only", label: "Read only", approvalPolicy: "on-request", approvalsReviewer: "user", sandboxMode: "read-only" },
+    { id: "full-access", label: "Full access", approvalPolicy: "never", approvalsReviewer: "user", sandboxMode: "danger-full-access" },
+  ] as const;
+  const approvalPreset = approvalPresets.find(preset => preset.approvalPolicy === permissions.approvalPolicy && preset.approvalsReviewer === permissions.approvalsReviewer && preset.sandboxMode === permissions.sandboxMode);
+  const presetAllowed = (preset: typeof approvalPresets[number]) => (
+    (!props.requirements?.allowedApprovalPolicies || props.requirements.allowedApprovalPolicies.includes(preset.approvalPolicy)) &&
+    (!props.requirements?.allowedApprovalsReviewers || props.requirements.allowedApprovalsReviewers.includes(preset.approvalsReviewer)) &&
+    (!props.requirements?.allowedSandboxModes || props.requirements.allowedSandboxModes.includes(preset.sandboxMode))
+  );
+  const configuredEffort = inheritedValue("reasoningEffort", "model_reasoning_effort", "");
+  const effectiveEffort = props.settings.reasoningEffort || (configuredEffort && (!model?.supportedReasoningEfforts || model.supportedReasoningEfforts.some(item => item.reasoningEffort === configuredEffort)) ? configuredEffort : model?.defaultReasoningEffort);
+  const configuredTier = serviceTierForModel(model, inheritedValue("serviceTier", "service_tier", ""));
+  const effectiveTier = props.settings.serviceTier || (configuredTier && (!model?.serviceTiers || model.serviceTiers.some(item => item.id === configuredTier)) ? configuredTier : model?.defaultServiceTier || "default");
+  const fast = effectiveTier === "fast" || effectiveTier === "priority";
+  const fastSupported = !model?.serviceTiers || model.serviceTiers.some(item => item.id === "fast" || item.id === "priority");
+  const modelLabel = model?.name || inheritedValue("model", "model", "Codex default");
   const change = async (settings: AgentSettings) => {
+    if (blocked || changing.current) return;
+    changing.current = true;
+    setSaving(true);
     try { await props.onChange(settings); }
     catch (cause) { props.onError(errorMessage(cause)); }
+    finally { changing.current = false; setSaving(false); }
   };
   return <>
-    <div className="agent-settings-quick" aria-label="Conversation settings">
-      <label className="agent-quick-select agent-quick-model"><span>Model</span><div><Icon name="terminal" size={14} /><select aria-label="Agent model" value={props.settings.model} disabled={props.disabled || props.saving} onChange={event => void change(changeModel(props.settings, event.target.value, props.models, props.defaults))}><ModelOptions {...options} /></select><Icon name="chevron" size={12} /></div></label>
-      <label className="agent-quick-select"><span>Thinking</span><select aria-label="Thinking level" value={props.settings.reasoningEffort} disabled={props.disabled || props.saving} onChange={event => void change({ ...props.settings, reasoningEffort: event.target.value })}><EffortOptions {...options} /></select></label>
-      <label className="agent-quick-select"><span>Speed</span><select aria-label="Speed" value={props.settings.serviceTier} disabled={props.disabled || props.saving} onChange={event => void change({ ...props.settings, serviceTier: event.target.value })}><TierOptions {...options} /></select></label>
-      <button type="button" className="icon-button agent-settings-button" aria-label="Codex settings" title="Codex settings · applies next turn" disabled={props.disabled} onClick={() => setOpen(true)}><Icon name="settings" size={17} /></button>
+    <div className="composer-settings-controls" aria-label="Conversation settings" aria-busy={saving || props.saving}>
+      <label className="composer-setting composer-approval-setting" title="Approval mode · applies next turn">
+        <span className="composer-setting-label">{approvalPreset?.label ?? "Custom permissions"}</span><Icon name="chevron" size={12} />
+        <select aria-label="Approval mode" value={approvalPreset?.id ?? "custom"} disabled={blocked} onChange={event => {
+          const preset = approvalPresets.find(item => item.id === event.target.value);
+          if (preset && presetAllowed(preset)) void change({ ...props.settings, approvalPolicy: preset.approvalPolicy, approvalsReviewer: preset.approvalsReviewer, sandboxMode: preset.sandboxMode });
+        }}>
+          {!approvalPreset && <option value="custom" disabled>Custom permissions</option>}
+          {approvalPresets.map(preset => <option key={preset.id} value={preset.id} disabled={!presetAllowed(preset)}>{preset.label}{!presetAllowed(preset) ? " (managed)" : ""}</option>)}
+        </select>
+      </label>
+      <label className="composer-setting composer-mode-setting" title="Collaboration mode · applies next turn">
+        <span className="composer-setting-label">{displayValue(props.settings.collaborationMode)}</span><Icon name="chevron" size={12} />
+        <select aria-label="Collaboration mode" value={props.settings.collaborationMode} disabled={blocked} onChange={event => void change({ ...props.settings, collaborationMode: event.target.value as AgentSettings["collaborationMode"] })}><option value="default">Default</option><option value="plan">Plan</option></select>
+      </label>
+      <label className="composer-setting composer-model-setting" title={`${modelLabel} · applies next turn`}>
+        <span className="composer-setting-label">{modelLabel}</span><Icon name="chevron" size={12} />
+        <select aria-label="Agent model" value={props.settings.model} disabled={blocked} onChange={event => void change(changeModel(props.settings, event.target.value, props.models, props.defaults))}><ModelOptions {...options} /></select>
+      </label>
+      <label className="composer-setting composer-effort-setting" title="Thinking level · applies next turn">
+        <span className="composer-setting-label">{effectiveEffort ? displayValue(effectiveEffort) : "Default"}</span><Icon name="chevron" size={12} />
+        <select aria-label="Thinking level" value={props.settings.reasoningEffort} disabled={blocked} onChange={event => void change({ ...props.settings, reasoningEffort: event.target.value })}><EffortOptions {...options} /></select>
+      </label>
+      <button type="button" role="switch" className="composer-fast-mode" aria-label="Fast mode" aria-checked={fast} title={fastSupported ? "Fast mode · applies next turn" : `Fast mode is unavailable for ${model?.name ?? "this model"}.`} disabled={blocked || !fastSupported} onClick={() => void change({ ...props.settings, serviceTier: fast ? "default" : serviceTierForModel(model, "fast") })}>
+        <span>Fast mode</span><span className="composer-fast-switch" aria-hidden="true" />
+      </button>
+      <button type="button" className="icon-button composer-more-settings" aria-label="More Codex settings" title="More Codex settings" disabled={blocked} onClick={() => setOpen(true)}><Icon name="settings" size={17} /></button>
     </div>
-    {open && <SettingsDialog {...props} onClose={() => setOpen(false)} />}
+    {open && createPortal(<SettingsDialog {...props} onClose={() => setOpen(false)} />, document.body)}
   </>;
 }

@@ -101,6 +101,8 @@ function Composer({ props, running, ready, inputRef }: {
   inputRef: React.RefObject<HTMLTextAreaElement>;
 }) {
   const text = useAuiState(s => s.composer.text);
+  const session = props.state?.sessions.find(item => item.id === props.state?.activeSessionId) ?? props.state?.sessions.at(-1);
+  const settings = session?.settings ?? props.state?.runtime.settings ?? defaultAgentSettings();
   // A running Codex turn accepts immediate steering through the existing API.
   // Keep that behavior instead of introducing a second, client-owned queue.
   const sendUpdate = async () => {
@@ -130,7 +132,7 @@ function Composer({ props, running, ready, inputRef }: {
         }}
       />
       <div className="composer-toolbar">
-        <span className="canvas-context" title="The current canvas and your selection are included with each message"><Icon name="board" size={14} />Canvas included</span>
+        <AgentSettingsControls key={session?.id ?? "new"} settings={settings} defaults={props.state?.runtime.defaults} models={props.state?.runtime.models ?? []} requirements={props.state?.runtime.requirements} running={running} disabled={!props.state || props.sessionBusy} saving={props.settingsSaving} onChange={props.onChangeSettings} onSaveDefaults={props.onSaveDefaultSettings} onError={props.onError} />
         <div className="composer-buttons">
           {running && <ComposerPrimitive.Cancel className="stop-button" aria-label="Stop agent" title="Stop the current turn"><Icon name="stop" size={13} />Stop</ComposerPrimitive.Cancel>}
           {running
@@ -139,7 +141,7 @@ function Composer({ props, running, ready, inputRef }: {
         </div>
       </div>
     </ComposerPrimitive.Root>
-    <div className="composer-footer"><span>Codex works in your local workspace.</span><span>Enter to send · Shift+Enter for newline</span></div>
+    <div className="composer-footer"><span className="canvas-context" title="The current canvas and your selection are included with each message"><Icon name="board" size={12} />Canvas included</span><span>Enter to send · Shift+Enter for newline</span></div>
   </div>;
 }
 
@@ -218,7 +220,6 @@ export function ChatWorkspace(props: WorkspaceProps) {
   }, [sidebarOpen]);
 
   const navigationBusy = !state || props.sessionBusy;
-  const settings = session?.settings ?? state?.runtime.settings ?? defaultAgentSettings();
   const activities = session?.activities ?? [];
   const activeTool = [...activities].reverse().find(item => item.status === "running" || item.status === "in_progress");
   const suggest = (text: string) => { runtime.thread.composer.setText(text); inputRef.current?.focus(); };
@@ -244,7 +245,6 @@ export function ChatWorkspace(props: WorkspaceProps) {
         <nav className="mobile-tabs" aria-label="Workspace view"><button className={mobilePane === "chat" ? "active" : ""} onClick={() => setMobilePane("chat")}><Icon name="chat" size={16} />Conversation</button><button className={mobilePane === "canvas" ? "active" : ""} onClick={() => setMobilePane("canvas")}><Icon name="board" size={16} />Canvas</button></nav>
         <main className="workspace-layout">
           <section className="conversation-pane" aria-label="Agent conversation">
-            <div className="conversation-header"><AgentSettingsControls key={session?.id ?? "new"} settings={settings} defaults={state?.runtime.defaults} models={state?.runtime.models ?? []} requirements={state?.runtime.requirements} running={running} disabled={!state || props.sessionBusy} saving={props.settingsSaving} onChange={props.onChangeSettings} onSaveDefaults={props.onSaveDefaultSettings} onError={props.onError} /></div>
             <ThreadPrimitive.Root className="chat-thread">
               <ThreadPrimitive.Viewport className="transcript">
                 {!session?.messages.length && !running && <div className="welcome">
