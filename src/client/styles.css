@@ -25,7 +25,7 @@ a { color: inherit; }
 .app-sidebar { width: 208px; flex: 0 0 208px; background: #f8f8f9; border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; padding: 0 12px; }
 .sidebar-brand { display: flex; align-items: center; height: 64px; flex-shrink: 0; padding: 0 7px; }
 .sidebar-brand a { display: flex; align-items: center; gap: 9px; font-size: 16px; font-weight: 650; letter-spacing: -.6px; text-decoration: none; }
-.brand-icon { width: 29px; height: 29px; display: flex; align-items: center; justify-content: center; border: 1px solid #dedee2; border-radius: 8px; background: #fff; }
+.brand-icon { width: 29px; height: 29px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
 .icon-button { width: 30px; height: 30px; border-radius: 7px; display: inline-flex; align-items: center; justify-content: center; color: #74747c; flex-shrink: 0; }
 .icon-button:hover { color: #25252a; background: #eeeef0; }
 .sidebar-close { display: none; margin-left: auto; }

@@ -8,6 +8,7 @@
     "node": ">=24.0.0"
   },
   "scripts": {
+    "brand:build": "node scripts/build-brand.mjs",
     "dev": "concurrently -k -n server,web 'node --import tsx --watch src/server/index.ts' 'vite --host 127.0.0.1'",
     "build": "tsc --noEmit && vite build",
     "start": "node --import tsx src/server/index.ts",

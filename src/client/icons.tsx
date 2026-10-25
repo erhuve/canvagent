@@ -34,5 +34,5 @@ export function Icon({ name, size = 18, style, className }: { name: string; size
 }
 
 export function BrandMark({ size = 32 }: { size?: number }) {
-  return <svg width={size} height={size} viewBox="0 0 40 40" fill="none" aria-hidden="true"><rect width="40" height="40" rx="11" fill="currentColor" /><path d="M28 12H18a8 8 0 0 0 0 16h4a6 6 0 0 0 0-12h-3" stroke="#bad8ac" strokeWidth="2.6" strokeLinecap="round" /><circle cx="28" cy="12" r="2.2" fill="#bad8ac" /></svg>;
+  return <img src="/brand/mark.svg" width={size} height={size} alt="" aria-hidden="true" />;
 }

@@ -16,7 +16,7 @@ import { MarkdownTextPrimitive } from "@assistant-ui/react-markdown";
 import { defaultAgentSettings, type AgentSettings } from "../shared/settings";
 import { AgentSettingsControls } from "./AgentSettings";
 import { errorMessage } from "./api";
-import { Icon } from "./icons";
+import { BrandMark, Icon } from "./icons";
 import type { AppState, Message, Session } from "./types";
 
 const activeStatuses = new Set(["running", "starting", "awaiting_approval"]);
@@ -228,7 +228,7 @@ export function ChatWorkspace(props: WorkspaceProps) {
     <div className={`app-shell ${sidebarOpen ? "sidebar-open" : ""}`}>
       {sidebarOpen && <button className="sidebar-scrim" aria-label="Close conversation history" onClick={() => setSidebarOpen(false)} />}
       <aside className="app-sidebar" aria-label="Conversation history">
-        <div className="sidebar-brand"><a href="/" aria-label="Canvagent home"><span className="brand-icon"><Icon name="board" size={19} /></span>canvagent</a><button className="icon-button sidebar-close" aria-label="Close sidebar" onClick={() => setSidebarOpen(false)}><Icon name="close" size={17} /></button></div>
+        <div className="sidebar-brand"><a href="/" aria-label="Canvagent home"><span className="brand-icon"><BrandMark size={25} /></span>canvagent</a><button className="icon-button sidebar-close" aria-label="Close sidebar" onClick={() => setSidebarOpen(false)}><Icon name="close" size={17} /></button></div>
         <ThreadListPrimitive.Root className="thread-list">
           <ThreadListPrimitive.New className="new-conversation" disabled={navigationBusy} aria-label="New conversation"><Icon name="compose" size={17} />New conversation<span>＋</span></ThreadListPrimitive.New>
           <span className="sidebar-label">Conversations</span>

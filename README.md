@@ -1,3 +1,8 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="public/brand/mark-dark.svg">
+  <img src="public/brand/mark.svg" alt="Canvagent logo: an open C with a cursor nestled inside" width="96" height="96">
+</picture>
+
 # canvagent
 
 Canvagent is a local Codex harness with a persistent Excalidraw canvas shared by you and your agent. Chat about a project, sketch an idea, drop in a screenshot, and let Codex inspect and annotate the same board while it works.
@@ -96,6 +101,10 @@ npm run test:e2e
 To check tool upgrades against an installed Codex CLI, run `npm run test:codex-tools` (or set `CANVAGENT_CODEX_BIN` to its executable). This creates and archives a disposable native conversation, uses a local inference stub, restarts the runtime, and verifies that its persisted context and thread ID survive while the latest drawing tools become available. No model inference is performed.
 
 The automated checks use test runtimes and do not require a Codex login or paid model calls. The browser tests exercise real drawing, regional capture, live notices, concurrent edits, reload, and guarded undo. Build before running them; on Linux, Playwright may require `npx playwright install --with-deps chromium`. Node 24 may print its standard experimental warning for the built-in SQLite module.
+
+## Brand assets
+
+The editable logo source is [`public/brand/mark.svg`](public/brand/mark.svg). Run `npm run brand:build` to regenerate the light and dark assets, launcher artwork, and macOS, Windows, and PNG app icons. Rebuild the desktop app to apply a regenerated icon to its bundle.
 
 ## Project documents
 
