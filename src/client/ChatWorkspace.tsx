@@ -85,7 +85,7 @@ type WorkspaceProps = {
   onConnect: () => void;
   onInterrupt: () => Promise<void>;
   settingsSaving?: boolean;
-  onChangeSettings: (settings: AgentSettings) => Promise<void>;
+  onChangeSettings: (settings: Partial<AgentSettings>, remember?: boolean) => Promise<void>;
   onSaveDefaultSettings: (settings: AgentSettings) => Promise<void>;
   onError: (message: string) => void;
   onDismissNotice: () => void;

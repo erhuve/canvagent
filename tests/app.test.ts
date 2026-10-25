@@ -595,6 +595,76 @@ test('workspace settings are defaults for new conversations; existing sessions k
   assert.ok(f.runtimes.every(runtime => !runtime.closed));
 });
 
+test('remembered composer settings survive restart and apply to new conversations without copying conversation instructions', async t => {
+  const f = await fixture(t, settingsCatalog);
+  await f.request('/api/runtime/connect', {});
+  const workspaceSettings = { additionalInstructions: 'Use the workspace conventions.', configOverrides: { model_context_window: 200000 } };
+  assert.equal((await f.request('/api/settings', workspaceSettings)).response.status, 200);
+  const conversationSettings = { additionalInstructions: 'Draw a diagram for this conversation.', configOverrides: { personality: 'pragmatic' } };
+  assert.equal((await f.request(`/api/sessions/${f.sessionId}/settings`, conversationSettings)).response.status, 200);
+  const existing = (await f.request('/api/sessions', { title: 'Keep my settings' })).body;
+  const existingSettings = structuredClone(existing.settings);
+  const approvalSettings = { approvalPolicy: 'on-request' as const, approvalsReviewer: 'auto_review' as const, sandboxMode: 'workspace-write' as const };
+  const modelSettings = { model: 'test-model', reasoningEffort: 'high', serviceTier: 'fast' };
+  for (const patch of [approvalSettings, modelSettings]) {
+    const saved = await f.request(`/api/sessions/${f.sessionId}/settings?remember=true`, patch);
+    assert.equal(saved.response.status, 200);
+    assert.equal(saved.body.id, f.sessionId, 'Remembering preferences keeps the existing session response shape.');
+    assert.deepEqual(saved.body.settings, { ...defaultAgentSettings(), ...conversationSettings, ...approvalSettings,
+      ...(patch === modelSettings ? modelSettings : {}) });
+  }
+  const expectedDefaults = { ...defaultAgentSettings(), ...workspaceSettings, ...approvalSettings, ...modelSettings };
+  assert.deepEqual(f.application.state().runtime.settings, expectedDefaults);
+  assert.equal(f.application.state().runtime.model, modelSettings.model);
+  assert.deepEqual(f.application.state().sessions.find(session => session.id === existing.id)!.settings, existingSettings);
+  assert.deepEqual((await f.request('/api/sessions', { title: 'Use remembered preferences' })).body.settings, expectedDefaults);
+  const dataDir = f.application.store.dataDir;
+  await f.application.close();
+  const reopened = createApplication({ workspace: f.workspace, dataDir, port: 0 });
+  try {
+    assert.deepEqual(reopened.state().runtime.settings, expectedDefaults);
+    assert.deepEqual(reopened.store.get('settings'), expectedDefaults);
+    assert.deepEqual(reopened.state().sessions.find(session => session.id === f.sessionId)!.settings,
+      { ...defaultAgentSettings(), ...conversationSettings, ...approvalSettings, ...modelSettings });
+    assert.deepEqual(reopened.state().sessions.find(session => session.id === existing.id)!.settings, existingSettings);
+    await new Promise<void>(resolveListen => reopened.server.listen(0, '127.0.0.1', resolveListen));
+    const address = reopened.server.address(); assert.ok(address && typeof address !== 'string');
+    const base = `http://127.0.0.1:${address.port}`;
+    const state = await fetch(`${base}/api/state`);
+    const cookie = state.headers.get('set-cookie')!.split(';')[0];
+    const created = await fetch(`${base}/api/sessions`, { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: '{}' });
+    assert.equal(created.status, 200);
+    assert.deepEqual((await created.json() as any).settings, expectedDefaults);
+  } finally { await reopened.close(); }
+});
+
+test('remembered settings validate the conversation, defaults and opt-in before changing saved preferences', async t => {
+  const f = await fixture(t, settingsCatalog);
+  await f.request('/api/runtime/connect', {});
+  assert.equal((await f.request('/api/settings', { model: 'small-model', reasoningEffort: 'low', serviceTier: 'flex' })).response.status, 200);
+  assert.equal((await f.request(`/api/sessions/${f.sessionId}/settings`, { model: 'test-model', reasoningEffort: 'high', serviceTier: 'fast' })).response.status, 200);
+  const original = structuredClone(f.application.state());
+  const savedSessions = f.application.store.get('sessions');
+  const savedDefaults = f.application.store.get('settings');
+  for (const [query, patch] of [
+    ['?remember=true', { reasoningEffort: 'high' }], // Valid for this conversation, incompatible with the default model.
+    ['?remember=true', { model: 'small-model' }], // Valid for defaults, incompatible with the conversation's thinking and speed.
+    ['?remember=true', { approvalsReviewer: 'unsupported' }],
+    ['?remember=false', { verbosity: 'low' }],
+    ['?remember=', { verbosity: 'low' }],
+    ['?remember=true&remember=true', { verbosity: 'low' }],
+  ] as const) {
+    const response = await f.request(`/api/sessions/${f.sessionId}/settings${query}`, patch);
+    assert.equal(response.response.status, 400, `Must reject ${query} with ${JSON.stringify(patch)}.`);
+    assert.deepEqual(f.application.state().runtime.settings, original.runtime.settings);
+    assert.equal(f.application.state().runtime.model, original.runtime.model);
+    assert.deepEqual(f.application.state().sessions, original.sessions);
+    assert.deepEqual(f.application.store.get('sessions'), savedSessions);
+    assert.deepEqual(f.application.store.get('settings'), savedDefaults);
+    assert.equal(f.runtimes[0].closed, false);
+  }
+});
+
 test('settings changed during parallel work apply to the next turn, including queued dispatch', async t => {
   const f = await fixture(t, settingsCatalog);
   await f.message('first');

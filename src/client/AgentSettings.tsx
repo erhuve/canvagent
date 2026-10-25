@@ -19,7 +19,7 @@ type SettingsProps = {
   running: boolean;
   disabled?: boolean;
   saving?: boolean;
-  onChange: (settings: AgentSettings) => Promise<void>;
+  onChange: (settings: Partial<AgentSettings>, remember?: boolean) => Promise<void>;
   onSaveDefaults: (settings: AgentSettings) => Promise<void>;
   onError: (message: string) => void;
 };
@@ -225,39 +225,49 @@ export function AgentSettingsControls(props: SettingsProps) {
   const fast = effectiveTier === "fast" || effectiveTier === "priority";
   const fastSupported = !model?.serviceTiers || model.serviceTiers.some(item => item.id === "fast" || item.id === "priority");
   const modelLabel = model?.name || inheritedValue("model", "model", "Codex default");
-  const change = async (settings: AgentSettings) => {
+  // Send only the selected controls so remembering a choice never promotes
+  // conversation-specific instructions or advanced config into defaults.
+  const modelSettings = (settings: AgentSettings) => {
+    const configured = (value: string, key: string) => value || (typeof settings.configOverrides[key] === "string" ? settings.configOverrides[key] as string : "");
+    return {
+      model: configured(settings.model, "model"),
+      reasoningEffort: configured(settings.reasoningEffort, "model_reasoning_effort"),
+      serviceTier: configured(settings.serviceTier, "service_tier"),
+    };
+  };
+  const change = async (settings: Partial<AgentSettings>) => {
     if (blocked || changing.current) return;
     changing.current = true;
     setSaving(true);
-    try { await props.onChange(settings); }
+    try { await props.onChange(settings, true); }
     catch (cause) { props.onError(errorMessage(cause)); }
     finally { changing.current = false; setSaving(false); }
   };
   return <>
     <div className="composer-settings-controls" aria-label="Conversation settings" aria-busy={saving || props.saving}>
-      <label className="composer-setting composer-approval-setting" title="Approval mode · applies next turn">
+      <label className="composer-setting composer-approval-setting" title="Approval mode · applies next turn and is remembered for new conversations">
         <span className="composer-setting-label">{approvalPreset?.label ?? "Custom permissions"}</span><Icon name="chevron" size={12} />
         <select aria-label="Approval mode" value={approvalPreset?.id ?? "custom"} disabled={blocked} onChange={event => {
           const preset = approvalPresets.find(item => item.id === event.target.value);
-          if (preset && presetAllowed(preset)) void change({ ...props.settings, approvalPolicy: preset.approvalPolicy, approvalsReviewer: preset.approvalsReviewer, sandboxMode: preset.sandboxMode });
+          if (preset && presetAllowed(preset)) void change({ approvalPolicy: preset.approvalPolicy, approvalsReviewer: preset.approvalsReviewer, sandboxMode: preset.sandboxMode });
         }}>
           {!approvalPreset && <option value="custom" disabled>Custom permissions</option>}
           {approvalPresets.map(preset => <option key={preset.id} value={preset.id} disabled={!presetAllowed(preset)}>{preset.label}{!presetAllowed(preset) ? " (managed)" : ""}</option>)}
         </select>
       </label>
-      <label className="composer-setting composer-mode-setting" title="Collaboration mode · applies next turn">
+      <label className="composer-setting composer-mode-setting" title="Collaboration mode · applies next turn and is remembered for new conversations">
         <span className="composer-setting-label">{displayValue(props.settings.collaborationMode)}</span><Icon name="chevron" size={12} />
-        <select aria-label="Collaboration mode" value={props.settings.collaborationMode} disabled={blocked} onChange={event => void change({ ...props.settings, collaborationMode: event.target.value as AgentSettings["collaborationMode"] })}><option value="default">Default</option><option value="plan">Plan</option></select>
+        <select aria-label="Collaboration mode" value={props.settings.collaborationMode} disabled={blocked} onChange={event => void change({ collaborationMode: event.target.value as AgentSettings["collaborationMode"] })}><option value="default">Default</option><option value="plan">Plan</option></select>
       </label>
-      <label className="composer-setting composer-model-setting" title={`${modelLabel} · applies next turn`}>
+      <label className="composer-setting composer-model-setting" title={`${modelLabel} · applies next turn and is remembered for new conversations`}>
         <span className="composer-setting-label">{modelLabel}</span><Icon name="chevron" size={12} />
-        <select aria-label="Agent model" value={props.settings.model} disabled={blocked} onChange={event => void change(changeModel(props.settings, event.target.value, props.models, props.defaults))}><ModelOptions {...options} /></select>
+        <select aria-label="Agent model" value={props.settings.model} disabled={blocked} onChange={event => void change(modelSettings(changeModel(props.settings, event.target.value, props.models, props.defaults)))}><ModelOptions {...options} /></select>
       </label>
-      <label className="composer-setting composer-effort-setting" title="Thinking level · applies next turn">
+      <label className="composer-setting composer-effort-setting" title="Thinking level · applies next turn and is remembered for new conversations">
         <span className="composer-setting-label">{effectiveEffort ? displayValue(effectiveEffort) : "Default"}</span><Icon name="chevron" size={12} />
-        <select aria-label="Thinking level" value={props.settings.reasoningEffort} disabled={blocked} onChange={event => void change({ ...props.settings, reasoningEffort: event.target.value })}><EffortOptions {...options} /></select>
+        <select aria-label="Thinking level" value={props.settings.reasoningEffort} disabled={blocked} onChange={event => void change({ ...modelSettings(props.settings), reasoningEffort: event.target.value })}><EffortOptions {...options} /></select>
       </label>
-      <button type="button" role="switch" className="composer-fast-mode" aria-label="Fast mode" aria-checked={fast} title={fastSupported ? "Fast mode · applies next turn" : `Fast mode is unavailable for ${model?.name ?? "this model"}.`} disabled={blocked || !fastSupported} onClick={() => void change({ ...props.settings, serviceTier: fast ? "default" : serviceTierForModel(model, "fast") })}>
+      <button type="button" role="switch" className="composer-fast-mode" aria-label="Fast mode" aria-checked={fast} title={fastSupported ? "Fast mode · applies next turn and is remembered for new conversations" : `Fast mode is unavailable for ${model?.name ?? "this model"}.`} disabled={blocked || !fastSupported} onClick={() => void change({ ...modelSettings(props.settings), serviceTier: fast ? "default" : serviceTierForModel(model, "fast") })}>
         <span>Fast mode</span><span className="composer-fast-switch" aria-hidden="true" />
       </button>
       <button type="button" className="icon-button composer-more-settings" aria-label="More Codex settings" title="More Codex settings" disabled={blocked} onClick={() => setOpen(true)}><Icon name="settings" size={17} /></button>

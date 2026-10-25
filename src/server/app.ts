@@ -455,7 +455,15 @@ export function createApplication(options: ApplicationOptions) {
   app.post('/api/sessions/:id/activate', (req, res) => { findSession(req.params.id); activeSessionId = req.params.id; persist(); emit({ type: 'state', state: state() }); res.json({ ok: true }); });
   app.post('/api/sessions/:id/settings', (req, res) => {
     const session = findSession(req.params.id);
-    session.settings = updateSettings(session.settings ?? runtimeState.settings, req.body);
+    const remember = z.enum(['true']).optional().parse(req.query.remember) === 'true';
+    const settings = updateSettings(session.settings ?? runtimeState.settings, req.body);
+    const defaults = remember ? updateSettings(runtimeState.settings, req.body) : undefined;
+    session.settings = settings;
+    if (defaults) {
+      runtimeState.settings = defaults; runtimeState.model = defaults.model;
+      store.set('settings', defaults); store.set('model', defaults.model);
+      runtimeChanged();
+    }
     sessionChanged(session); res.json(session);
   });
   app.post('/api/sessions/:id/messages', async (req, res) => {

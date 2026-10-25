@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { mkdtempSync, mkdirSync, realpathSync, rmSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -47,7 +48,7 @@ async function start(t: TestContext, root: string) {
   return { child, url, exited };
 }
 
-test('the bundled Node helper serves the app and persists a board across desktop restarts', async t => {
+test('the bundled Node helper serves the app and persists a board and Codex preferences across desktop restarts', async t => {
   const root = directory(t);
   const first = await start(t, root);
   const response = await fetch(`${first.url}/api/state`);
@@ -67,15 +68,38 @@ test('the bundled Node helper serves the app and persists a board across desktop
     body: JSON.stringify({ requestId: 'desktop-drawing', observedBoardRevision: 0, operations: [{ kind: 'create', elementId: 'desktop-shape', element: { id: 'desktop-shape', type: 'rectangle', x: 50, y: 60, width: 100, height: 80, version: 1, isDeleted: false } }] }),
   });
   assert.equal(mutation.status, 200);
+  const remembered = await fetch(`${first.url}/api/sessions/${state.activeSessionId}/settings?remember=true`, {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ approvalPolicy: 'on-request', approvalsReviewer: 'auto_review', sandboxMode: 'workspace-write' }),
+  });
+  assert.equal(remembered.status, 200);
+  assert.equal((await remembered.json() as any).settings.approvalsReviewer, 'auto_review');
   const socket = new WebSocket(`${first.url.replace('http:', 'ws:')}/api/events`, { origin: first.url, headers: { cookie } });
   const [snapshot] = await once(socket, 'message');
   assert.equal(JSON.parse(snapshot.toString()).state.board.elements[0].id, 'desktop-shape');
   socket.close();
   first.child.stdin.write('shutdown\n');
   assert.equal((await first.exited)[0], 0);
+  const reserved = createServer();
+  t.after(() => new Promise<void>(resolveClose => reserved.close(() => resolveClose())));
+  await new Promise<void>((resolveListen, reject) => {
+    reserved.once('error', reject);
+    reserved.listen(Number(new URL(first.url).port), '127.0.0.1', resolveListen);
+  });
   const second = await start(t, root);
-  const reopened = await (await fetch(`${second.url}/api/state`)).json() as any;
+  assert.notEqual(new URL(second.url).port, new URL(first.url).port);
+  const secondBootstrap = await fetch(`${second.url}/api/state`);
+  const secondCookie = secondBootstrap.headers.get('set-cookie')!.split(';')[0];
+  const reopened = await secondBootstrap.json() as any;
   assert.equal(reopened.board.elements[0].id, 'desktop-shape');
+  assert.equal(reopened.activeSessionId, state.activeSessionId);
+  assert.equal(reopened.sessions.find((session: any) => session.id === state.activeSessionId).settings.approvalsReviewer, 'auto_review');
+  assert.equal(reopened.runtime.settings.approvalsReviewer, 'auto_review');
+  const created = await fetch(`${second.url}/api/sessions`, {
+    method: 'POST', headers: { cookie: secondCookie, 'Content-Type': 'application/json' }, body: '{}',
+  });
+  assert.equal(created.status, 200);
+  assert.equal((await created.json() as any).settings.approvalsReviewer, 'auto_review');
   second.child.stdin.write('shutdown\n');
   assert.equal((await second.exited)[0], 0);
 });

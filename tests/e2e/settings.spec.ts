@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
+import { defaultAgentSettings } from '../../src/shared/settings';
 
 async function state(page: Page) { return page.evaluate(async () => (await fetch('/api/state')).json()); }
 async function activeSession(page: Page) {
@@ -13,6 +14,9 @@ async function newConversation(page: Page) {
 }
 async function prepare(page: Page) {
   await page.goto('/');
+  await expect(page.getByRole('button', { name: 'New conversation', exact: true })).toBeEnabled();
+  const reset = await page.request.post('/api/settings', { data: defaultAgentSettings() });
+  expect(reset.ok()).toBe(true);
   await newConversation(page);
   const connect = page.getByRole('button', { name: 'Connect Codex', exact: true });
   if (await connect.isVisible()) await connect.click();
@@ -53,9 +57,10 @@ test('common settings live in the composer and preserve an unsent draft', async 
   await expect(dialog).toHaveCount(0);
   await expect(input).toHaveValue(draft);
   expect((await activeSession(page))).toMatchObject({ status: 'idle', turnId: null, messages: [] });
+  expect((await state(page)).runtime.settings).toMatchObject({ model: 'browser-fixture', reasoningEffort: 'high', serviceTier: 'fast', approvalsReviewer: 'auto_review', collaborationMode: 'plan', verbosity: '' });
 });
 
-test('settings belong to each conversation and survive navigation and reload', async ({ page }) => {
+test('dialog settings belong to each conversation while composer selections seed new conversations', async ({ page }) => {
   await prepare(page);
   const firstId = (await state(page)).activeSessionId;
   const input = page.getByRole('textbox', { name: 'Message Codex' });
@@ -82,7 +87,7 @@ test('settings belong to each conversation and survive navigation and reload', a
   expect((await activeSession(page)).settings).toMatchObject({ model: 'browser-fixture', reasoningEffort: 'high', serviceTier: 'fast', approvalPolicy: 'never', approvalsReviewer: 'auto_review', sandboxMode: 'read-only', networkAccess: false, webSearch: 'cached', reasoningSummary: 'concise', verbosity: 'low', writableRoots: ['/tmp/extra-root', '/tmp/another-root'], additionalInstructions: 'Keep responses focused on this project.', configOverrides: { model_context_window: 200000 } });
   const secondId = await newConversation(page);
   expect(secondId).not.toBe(firstId);
-  expect((await activeSession(page)).settings.reasoningEffort).not.toBe('high');
+  expect((await activeSession(page)).settings).toMatchObject({ model: 'browser-fixture', reasoningEffort: 'high', serviceTier: 'fast', approvalPolicy: 'on-request', sandboxMode: 'workspace-write', additionalInstructions: '', configOverrides: {} });
   await page.getByRole('combobox', { name: 'Agent model', exact: true }).selectOption('browser-light');
   await page.getByRole('combobox', { name: 'Thinking level', exact: true }).selectOption('low');
   await page.getByRole('button', { name: `Open conversation: ${firstTitle}`, exact: true }).click();
@@ -92,6 +97,33 @@ test('settings belong to each conversation and survive navigation and reload', a
   await expect(page.getByRole('combobox', { name: 'Agent model', exact: true })).toHaveValue('browser-fixture');
   expect((await activeSession(page)).settings.configOverrides).toEqual({ model_context_window: 200000 });
   expect((await state(page)).sessions.find((session: any) => session.id === secondId).settings).toMatchObject({ model: 'browser-light', reasoningEffort: 'low' });
+});
+
+test('Auto review and common settings are remembered after reload and in a new conversation', async ({ page }) => {
+  await prepare(page);
+  const originalId = (await state(page)).activeSessionId;
+  const originalSettings = (await activeSession(page)).settings;
+  await newConversation(page);
+  const dialog = await openSettings(page);
+  await dialog.getByRole('textbox', { name: 'Additional instructions', exact: false }).fill('Only this conversation should have this instruction.');
+  await dialog.getByRole('textbox', { name: 'Advanced Codex configuration (JSON)', exact: false }).fill('{"model_context_window": 180000}');
+  await dialog.getByRole('button', { name: 'Save settings', exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  await page.getByRole('combobox', { name: 'Approval mode', exact: true }).selectOption('auto-review');
+  await page.getByRole('combobox', { name: 'Agent model', exact: true }).selectOption('browser-fixture');
+  await page.getByRole('combobox', { name: 'Thinking level', exact: true }).selectOption('high');
+  await page.getByRole('switch', { name: 'Fast mode', exact: true }).click();
+  await page.getByRole('combobox', { name: 'Collaboration mode', exact: true }).selectOption('plan');
+  await page.reload();
+  await expect(page.getByRole('combobox', { name: 'Approval mode', exact: true })).toHaveValue('auto-review');
+  await newConversation(page);
+  await expect(page.getByRole('combobox', { name: 'Approval mode', exact: true })).toHaveValue('auto-review');
+  await expect(page.getByRole('combobox', { name: 'Agent model', exact: true })).toHaveValue('browser-fixture');
+  await expect(page.getByRole('combobox', { name: 'Thinking level', exact: true })).toHaveValue('high');
+  await expect(page.getByRole('switch', { name: 'Fast mode', exact: true })).toBeChecked();
+  await expect(page.getByRole('combobox', { name: 'Collaboration mode', exact: true })).toHaveValue('plan');
+  expect((await activeSession(page)).settings).toMatchObject({ additionalInstructions: '', configOverrides: {} });
+  expect((await state(page)).sessions.find((session: any) => session.id === originalId).settings).toEqual(originalSettings);
 });
 
 test('a working conversation can save settings for its next turn and still run other conversations', async ({ page }) => {
@@ -200,6 +232,20 @@ test('turning Fast mode off explicitly overrides inherited fast configuration', 
   await expect(fast).not.toBeChecked();
   const saved = await openSettings(page);
   await expect(saved.getByRole('combobox', { name: 'Speed', exact: true })).toHaveValue('default');
+});
+
+test('remembered thinking and speed retain the model selected through advanced configuration', async ({ page }) => {
+  await prepare(page);
+  const dialog = await openSettings(page);
+  await dialog.getByRole('textbox', { name: 'Advanced Codex configuration (JSON)', exact: false }).fill('{"model": "browser-light"}');
+  await dialog.getByRole('button', { name: 'Save settings', exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  await page.getByRole('combobox', { name: 'Thinking level', exact: true }).selectOption('low');
+  await expect.poll(async () => (await state(page)).runtime.settings).toMatchObject({ model: 'browser-light', reasoningEffort: 'low', configOverrides: {} });
+  await newConversation(page);
+  await expect(page.getByRole('combobox', { name: 'Agent model', exact: true })).toHaveValue('browser-light');
+  await expect(page.getByRole('combobox', { name: 'Thinking level', exact: true })).toHaveValue('low');
+  await expect(page.getByRole('switch', { name: 'Fast mode', exact: true })).toBeDisabled();
 });
 
 test('saving defaults affects new conversations, and the settings dialog fits mobile and closes with Escape', async ({ page }) => {

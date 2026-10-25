@@ -177,12 +177,12 @@ export default function App() {
     catch (error) { notify(errorMessage(error)); }
   };
 
-  const changeSettings = async (settings: AgentSettings) => {
+  const changeSettings = async (settings: Partial<AgentSettings>, remember = false) => {
     if (!session) throw new Error("Open a conversation before changing settings.");
     const targetId = session.id;
     setSettingsSaving(true);
     try {
-      const updated = await api<AppState['sessions'][number]>(`/api/sessions/${encodeURIComponent(targetId)}/settings`, settings);
+      const updated = await api<AppState['sessions'][number]>(`/api/sessions/${encodeURIComponent(targetId)}/settings${remember ? '?remember=true' : ''}`, settings);
       setState(previous => previous ? { ...previous, sessions: previous.sessions.map(item => item.id === targetId ? { ...item, settings: updated.settings } : item) } : previous);
     } finally { setSettingsSaving(false); }
   };
