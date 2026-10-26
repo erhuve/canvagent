@@ -171,8 +171,9 @@ export function useBoard(notify: (message: string) => void) {
         else updated.set(element.id, { element: { ...element, isDeleted: true }, expectedRevision: pending.current.get(element.id)?.expectedRevision ?? canonical.current.metadata[element.id]?.revision });
       }
     }
+    const changed = updated.size !== pending.current.size || [...updated].some(([id, edit]) => pending.current.get(id) !== edit);
     pending.current = updated;
-    if (!conflicted.current) {
+    if (!conflicted.current && changed) {
       if (updated.size) {
         setSaveStatus(saving.current ? "saving" : "pending");
         clearTimeout(saveTimer.current);

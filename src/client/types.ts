@@ -65,6 +65,14 @@ export type AppState = {
   runtime: Runtime;
   artifacts: any[];
 };
+export type ProjectSummary = {
+  id: string;
+  name: string;
+  workspace: string;
+  sessions: Pick<Session, "id" | "title" | "status">[];
+  activeSessionId?: string;
+  available?: boolean;
+};
 export type Region = { x: number; y: number; width: number; height: number };
 export type PendingEdit = { element: SceneElement; expectedRevision?: number };
 export type MutationResult = {

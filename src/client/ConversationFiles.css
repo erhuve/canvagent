@@ -1,0 +1,17 @@
+.conversation-files { margin-top: 20px; border: 1px solid var(--line); border-radius: 9px; background: #fff; }
+.conversation-files > summary { display: flex; align-items: center; gap: 8px; padding: 12px 13px; cursor: pointer; list-style: none; color: #626273; font-size: 12px; user-select: none; }
+.conversation-files > summary::-webkit-details-marker { display: none; }
+.conversation-files > summary:hover { background: #fafafd; border-radius: 9px; color: #575767; }
+.conversation-files > summary:focus-visible { outline: 2px solid #9a96c5; outline-offset: 2px; border-radius: 9px; }
+.conversation-files-chevron { flex-shrink: 0; transform: rotate(-90deg); }
+.conversation-files > summary > span:first-of-type { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.conversation-files[open] .conversation-files-chevron { transform: none; }
+.conversation-files-count { padding: 1px 5px; border-radius: 4px; background: #f0f0f5; font-size: 11px; color: #646477; }
+.conversation-files > summary > small { margin-left: auto; font-size: 11px; white-space: nowrap; color: #6b6b7b; }
+.conversation-files-hide, .conversation-files[open] .conversation-files-show { display: none; }
+.conversation-files[open] .conversation-files-hide { display: inline; }
+.conversation-files-list { max-height: 250px; overflow: auto; padding: 0 5px 5px; border-top: 1px solid #f0f0f4; }
+.conversation-files-list > a { display: flex; align-items: center; gap: 8px; padding: 10px 8px; text-decoration: none; font-size: 12px; color: #626273; border-radius: 6px; }
+.conversation-files-list > a:hover { background: #f6f6fa; }
+.conversation-files-list > a > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.conversation-files-list small { display: block; color: #6b6b7b; font-size: 11px; margin-top: 3px; overflow: hidden; text-overflow: ellipsis; }

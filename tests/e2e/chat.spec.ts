@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 
-async function state(page: Page) { return page.evaluate(async () => (await fetch('/api/state')).json()); }
+async function state(page: Page) { return page.evaluate(async () => (await fetch(new URL('api/state', location.href))).json()); }
 
 async function newConversation(page: Page) {
   const previous = (await state(page)).activeSessionId;
@@ -106,7 +106,9 @@ test('mobile navigation keeps the canvas mounted and the conversation drawer usa
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto('/');
   await expect(page.getByRole('textbox', { name: 'Message Codex' })).toBeVisible();
-  await page.getByRole('button', { name: 'Canvas', exact: true }).click();
+  await page.getByRole('button', { name: 'Workspace', exact: true }).click();
+  await expect(page.getByRole('tab', { name: 'Browser', exact: true })).toBeVisible();
+  await expect(page.getByRole('tab', { name: 'Files', exact: true })).toBeVisible();
   await expect(page.locator('.excalidraw canvas.interactive')).toBeVisible();
   await page.getByRole('button', { name: 'Conversation', exact: true }).click();
   await page.getByRole('button', { name: 'Open conversation history', exact: true }).click();
@@ -176,6 +178,12 @@ test('a pending send in the background does not lock another composer or restore
     await input.fill('Second conversation draft');
     release!();
     await expect(page.getByText('Background send failed.', { exact: true })).toBeVisible();
+    await expect(input).toHaveValue('Second conversation draft');
+    const projectUrl = page.url();
+    await page.getByRole('button', { name: 'Open project: second-workspace', exact: true }).click();
+    await expect(page.getByRole('button', { name: 'Open project: second-workspace', exact: true })).toHaveAttribute('aria-current', 'page');
+    await page.getByRole('button', { name: 'Open project: browser-workspace', exact: true }).click();
+    await expect(page).toHaveURL(projectUrl);
     await expect(input).toHaveValue('Second conversation draft');
     await page.getByRole('button', { name: `Open conversation: ${firstTitle}`, exact: true }).click();
     await expect.poll(async () => (await state(page)).activeSessionId).toBe(firstId);

@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { expect, test, type Page } from '@playwright/test';
 
-async function state(page: Page) { return page.evaluate(async () => { const response = await fetch('/api/state'); return response.json(); }); }
+async function state(page: Page) { return page.evaluate(async () => { const response = await fetch(new URL('api/state', location.href)); return response.json(); }); }
 
 async function drawRectangle(page: Page, offsetX: number, offsetY: number) {
   const surface = page.locator('.excalidraw canvas.interactive').first();
@@ -25,7 +25,7 @@ test('a real drawing, browser capture, agent note, live notice and safe undo sha
   const initial = await state(page);
   const existing = initial.board.elements.filter((element: any) => !element.isDeleted);
   if (existing.length) await page.evaluate(async ({ revision, operations }) => {
-    const response = await fetch('/api/board/mutate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ requestId: crypto.randomUUID(), observedBoardRevision: revision, operations }) });
+    const response = await fetch(new URL('api/board/mutate', location.href), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ requestId: crypto.randomUUID(), observedBoardRevision: revision, operations }) });
     if (!response.ok) throw new Error('Could not prepare an empty fixture board.');
   }, { revision: initial.board.revision, operations: existing.map((element: any) => ({ kind: 'delete', elementId: element.id, expectedRevision: initial.board.metadata[element.id].revision })) });
   if (initial.sessions.some((session: any) => session.messages.length)) await page.getByRole('button', { name: 'New conversation', exact: true }).click();
@@ -66,7 +66,6 @@ test('a real drawing, browser capture, agent note, live notice and safe undo sha
   expect((await state(page)).board.revision).toBe(annotated.board.revision);
   const settled = await state(page);
   expect(settled.sessions.find((entry: any) => entry.id === settled.activeSessionId).activities.filter((activity: any) => activity.title.startsWith('Canvas revision'))).toHaveLength(0);
-  await page.screenshot({ path: 'test-results/shared-canvas-annotated.png' });
 
   await drawRectangle(page, 280, 390);
   await expect.poll(async () => (await state(page)).board.elements.filter((element: any) => !element.isDeleted && element.type === 'rectangle').length).toBe(2);

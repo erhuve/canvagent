@@ -12,13 +12,14 @@ export default defineConfig({
   use: {
     baseURL: 'http://127.0.0.1:4319',
     viewport: { width: 1440, height: 1000 },
-    trace: 'retain-on-failure',
-    screenshot: 'only-on-failure',
+    trace: 'off',
+    screenshot: 'off',
+    video: 'off',
     launchOptions: { ...(systemChromium ? { executablePath: systemChromium } : {}), args: ['--no-sandbox', '--disable-crash-reporter', '--disable-breakpad'] },
   },
   webServer: {
     command: 'node --import tsx tests/fixtures/e2e-server.ts',
-    url: 'http://127.0.0.1:4319/api/state',
+    url: 'http://127.0.0.1:4319/api/projects',
     reuseExistingServer: false,
     timeout: 15000,
   },

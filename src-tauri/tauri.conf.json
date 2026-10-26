@@ -23,6 +23,6 @@
     "externalBin": ["binaries/canvagent-node"],
     "resources": { "resources/": "desktop/" },
     "icon": ["icons/icon.png", "icons/icon.icns", "icons/icon.ico"],
-    "macOS": { "minimumSystemVersion": "13.0", "entitlements": "Entitlements.plist", "signingIdentity": "-" }
+    "macOS": { "minimumSystemVersion": "13.0", "entitlements": "Entitlements.plist", "infoPlist": "Info.plist", "signingIdentity": "-" }
   }
 }

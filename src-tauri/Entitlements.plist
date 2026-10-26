@@ -2,4 +2,7 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>com.apple.security.cs.allow-jit</key><true/>
+  <!-- Tauri re-signs the bundled Node helper with this entitlement set.
+       Ad-hoc signed local builds need Node's native-addon loading permission. -->
+  <key>com.apple.security.cs.disable-library-validation</key><true/>
 </dict></plist>

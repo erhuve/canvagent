@@ -42,9 +42,36 @@ await copyFile(join(extracted, 'LICENSE'), join(resources, 'NODE-LICENSE.txt'));
 await build({
   entryPoints: [join(root, 'src/server/desktop.ts')], outfile: join(resources, 'server.mjs'),
   bundle: true, platform: 'node', format: 'esm', target: 'node24',
-  external: ['bufferutil', 'utf-8-validate'],
+  external: ['bufferutil', 'utf-8-validate', 'node-pty'],
   banner: { js: 'import { createRequire as __createRequire } from "node:module"; import { fileURLToPath as __fileURLToPath } from "node:url"; import { dirname as __pathDirname } from "node:path"; const require = __createRequire(import.meta.url); const __filename = __fileURLToPath(import.meta.url); const __dirname = __pathDirname(__filename);' },
 });
+// Native PTY bindings must remain an external Node package so their relative
+// .node library and spawn-helper paths also work outside the source checkout.
+const ptySource = join(root, 'node_modules', 'node-pty');
+const ptyTarget = join(resources, 'node_modules', 'node-pty');
+await rm(ptyTarget, { recursive: true, force: true });
+await mkdir(ptyTarget, { recursive: true });
+for (const file of ['package.json', 'LICENSE', 'lib']) await cp(join(ptySource, file), join(ptyTarget, file), { recursive: true });
+const ptyNativeDir = existsSync(join(ptySource, 'build/Release/pty.node')) ? 'build/Release' : `prebuilds/${platformKey}`;
+if (!existsSync(join(ptySource, ptyNativeDir))) throw new Error(`Build node-pty for ${platformKey} before packaging the desktop app.`);
+await cp(join(ptySource, ptyNativeDir), join(ptyTarget, ptyNativeDir), { recursive: true });
+const ptyHelper = join(ptyTarget, ptyNativeDir, 'spawn-helper');
+if (existsSync(ptyHelper) && nodePlatform !== 'win') await chmod(ptyHelper, 0o755);
+if (nodePlatform === 'darwin') {
+  for (const file of ['pty.node', 'spawn-helper']) {
+    const binary = join(ptyTarget, ptyNativeDir, file);
+    if (existsSync(binary)) execFileSync('codesign', ['--force', '--sign', '-', binary], { stdio: 'pipe' });
+  }
+}
+const editorTerminalLicenses = [
+  ['Monaco Editor', 'monaco-editor/LICENSE'],
+  ['monaco-vim', 'monaco-vim/LICENSE'],
+  ['CodeMirror Vim bindings', 'monaco-vim/LICENSE.codemirror.txt'],
+  ['xterm.js', '@xterm/xterm/LICENSE'],
+  ['xterm.js Fit Addon', '@xterm/addon-fit/LICENSE'],
+  ['node-pty', 'node-pty/LICENSE'],
+];
+await writeFile(join(resources, 'EDITOR-TERMINAL-LICENSES.txt'), (await Promise.all(editorTerminalLicenses.map(async ([name, file]) => `${name}\n\n${await readFile(join(root, 'node_modules', file), 'utf8')}`))).join('\n\n---\n\n'));
 await rm(join(resources, 'web'), { recursive: true, force: true });
 await cp(join(root, 'dist'), join(resources, 'web'), { recursive: true, filter: path => !path.endsWith('.map') });
 await cp(join(root, 'node_modules/@excalidraw/excalidraw/dist/prod'), join(resources, 'excalidraw'), { recursive: true });

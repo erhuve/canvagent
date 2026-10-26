@@ -1,17 +1,15 @@
-import { createHash } from 'node:crypto';
-import { accessSync, constants, existsSync, realpathSync } from 'node:fs';
+import { accessSync, constants, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { delimiter, dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { parseArgs } from 'node:util';
-import { createApplication } from './app.js';
+import { createWorkspaceHost } from './workspaces.js';
 
 const { values } = parseArgs({ options: {
   workspace: { type: 'string' }, 'data-root': { type: 'string' }, resources: { type: 'string' },
 } });
 if (!values.workspace || !values['data-root'] || !values.resources) throw new Error('Desktop startup requires a workspace, data root, and resource directory.');
 const workspace = realpathSync(values.workspace);
-const key = createHash('sha256').update(workspace).digest('hex').slice(0, 16);
 const resources = resolve(values.resources);
 
 // Finder and other desktop launchers do not inherit a terminal's PATH.
@@ -31,12 +29,8 @@ const runtimeCommand = candidates.find(path => {
 });
 if (runtimeCommand) process.env.PATH = [dirname(runtimeCommand), process.env.PATH].join(delimiter);
 
-// Reuse the normal CLI data location when present. Otherwise desktop data is
-// kept in the OS application-data directory, outside the selected project.
-const legacyData = join(homedir(), '.local', 'share', 'canvagent', key);
-const dataDir = existsSync(join(legacyData, 'canvagent.sqlite')) ? legacyData : join(resolve(values['data-root']), 'workspaces', key);
-const application = createApplication({
-  workspace, dataDir, port: 0, desktop: true, runtimeCommand,
+const application = createWorkspaceHost({
+  workspace, dataRoot: join(resolve(values['data-root']), 'workspaces'), reuseLegacyData: true, port: 0, desktop: true, runtimeCommand,
   distDir: join(resources, 'web'), assetsDir: join(resources, 'excalidraw'),
 });
 let closing = false;
@@ -50,7 +44,7 @@ application.server.once('error', error => { console.error(error.message); void c
 application.server.listen(0, '127.0.0.1', () => {
   const address = application.server.address();
   if (!address || typeof address === 'string') throw new Error('The desktop service did not receive a local port.');
-  console.log(JSON.stringify({ type: 'ready', url: `http://127.0.0.1:${address.port}` }));
+  console.log(JSON.stringify({ type: 'ready', url: `http://127.0.0.1:${address.port}${application.projectPath(application.initialProjectId)}` }));
 });
 const input = createInterface({ input: process.stdin });
 input.on('line', line => { if (line === 'shutdown') void close(); });

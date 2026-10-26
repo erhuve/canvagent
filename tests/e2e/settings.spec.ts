@@ -1,7 +1,7 @@
 import { expect, test, type Page } from '@playwright/test';
 import { defaultAgentSettings } from '../../src/shared/settings';
 
-async function state(page: Page) { return page.evaluate(async () => (await fetch('/api/state')).json()); }
+async function state(page: Page) { return page.evaluate(async () => (await fetch(new URL('api/state', location.href))).json()); }
 async function activeSession(page: Page) {
   const saved = await state(page);
   return saved.sessions.find((session: any) => session.id === saved.activeSessionId);
@@ -15,7 +15,7 @@ async function newConversation(page: Page) {
 async function prepare(page: Page) {
   await page.goto('/');
   await expect(page.getByRole('button', { name: 'New conversation', exact: true })).toBeEnabled();
-  const reset = await page.request.post('/api/settings', { data: defaultAgentSettings() });
+  const reset = await page.request.post(new URL('api/settings', page.url()).href, { data: defaultAgentSettings() });
   expect(reset.ok()).toBe(true);
   await newConversation(page);
   const connect = page.getByRole('button', { name: 'Connect Codex', exact: true });
@@ -208,7 +208,7 @@ test('model switching uses the advertised thinking and speed catalogs', async ({
   await expect(fast).toBeEnabled();
   const customModel = 'custom-local-model';
   const id = (await state(page)).activeSessionId;
-  const saved = await page.request.post(`/api/sessions/${id}/settings`, { data: { model: customModel } });
+  const saved = await page.request.post(new URL(`api/sessions/${id}/settings`, page.url()).href, { data: { model: customModel } });
   expect(saved.ok()).toBe(true);
   await page.reload();
   await expect(model).toHaveValue(customModel);
@@ -274,7 +274,7 @@ test('saving defaults affects new conversations, and the settings dialog fits mo
     await expect(page.getByRole('combobox', { name: 'Agent model', exact: true })).toHaveValue('browser-light');
     await expect(page.getByRole('combobox', { name: 'Thinking level', exact: true })).toHaveValue('low');
   } finally {
-    const restored = await page.request.post('/api/settings', { data: original });
+    const restored = await page.request.post(new URL('api/settings', page.url()).href, { data: original });
     expect(restored.ok()).toBe(true);
   }
 });

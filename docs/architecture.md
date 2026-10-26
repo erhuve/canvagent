@@ -8,7 +8,7 @@ This is the proposed v1 design. The [roadmap](roadmap.md) grows a small working 
 
 Run one local Node.js service and open its React interface in a browser. The service lazily starts a Codex app-server subprocess over stdio for each conversation that connects or sends work. Use TypeScript across Canvagent.
 
-V1 supports one open project, one board per project, parallel conversations with one active agent turn per conversation, and one editing browser connection. Runtime connections, dispatch queues, approvals, and coalesced canvas notices belong to individual sessions. Navigation does not stop background work. Projects can have multiple saved sessions; each session is associated with that project's board. Reopening an old session shows the current board and its intervening changes. Historical board revisions are read-only context, rather than an automatic rollback.
+V1 supports multiple sidebar projects, one board per project, parallel conversations with one active agent turn per conversation, and one editing browser connection. A workspace host serves each project's independent application at `/projects/<workspace-hash>/` on the same local origin. Every project has its own database, files, browser cookie, WebSocket feed, and runtime state; the host persists the sidebar registry in `projects.json`. Runtime connections, dispatch queues, approvals, and coalesced canvas notices belong to individual sessions. Navigation saves pending canvas edits and does not stop background work. Visual captures require the requested project's editor to be connected. Projects can have multiple saved sessions; each session is associated with that project's board. Reopening an old session shows the current board and its intervening changes. Historical board revisions are read-only context, rather than an automatic rollback.
 
 Use SQLite for application metadata, board snapshots, operation receipts, and durable event records, plus a local managed directory for image and artifact bytes. Provider conversation history remains owned by Codex; Canvagent stores the provider thread reference and the UI records it needs. Storage lives in the user's application data directory, separate from project source files.
 
@@ -43,6 +43,9 @@ flowchart TB
 | Component | Owns |
 | --- | --- |
 | React interface | Conversation presentation, input, tool activity, approval prompts, connection and save state. |
+| Workspace dock | Canvas, browser, and file tabs beside chat. File buffers stay open across tab switches and guard project navigation when unsaved. |
+| Project files | Directory listing, bounded UTF-8 reads, revision-checked atomic saves, and safe raw previews, all rooted at the selected workspace. |
+| Desktop browser | A native child webview with URL/history controls and panel bounds. Only the main app webview receives desktop command capabilities. |
 | Excalidraw adapter | Native editor integration, selection, optimistic drawing, conversion to object patches, and rendering accepted board changes. |
 | Session controller | Project/session association, turn lifecycle, explicit user instructions, event routing, and pending approval correlation. |
 | Context builder | Bounded board overview, changed-object summaries, selection references, and delivery receipts. |
@@ -114,6 +117,10 @@ The adapter declares capabilities such as steering and image tool results. Unsup
 After an uncertain submission or a lost runtime connection, reconcile the existing turn before starting another. Reconnect does not blindly resend instructions or approvals. If the runtime has exited, keep the transcript and board, mark the run interrupted or unknown as appropriate, and offer resume.
 
 ## Persistence and recovery
+
+Runtime completion, approval/input requests, and failed or disconnected turns produce durable notifications in each project's Store. Stable IDs deduplicate repeated runtime events; interrupted turns do not produce completion alerts. The workspace host aggregates the latest 100 entries across loaded projects, including background work. Read state is persisted per notification, and the host registry retains the optional system-alert preference across backend ports and restarts.
+
+The client polls the host inbox while open. Its first snapshot establishes history without replaying system alerts. Subsequent unread entries may create system alerts only after opt-in and while the app is unfocused or hidden. Desktop uses the Tauri notification plugin through commands restricted to the main webview; notification clicks route to the saved project and conversation using the same guarded navigation as the sidebar. The notification list remains available when OS permission or delivery fails.
 
 Saved means the backend acknowledged a durable transaction. The UI shows saving, saved, disconnected, and conflicted states. On reconnect, fetch a current board snapshot and replay durable session events after the client's cursor. Replay events update presentation and never repeat their side effects.
 

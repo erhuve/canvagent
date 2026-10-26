@@ -1,9 +1,9 @@
 /** Browser-only fixture. The product always uses the real CodexRuntime. */
-import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { createApplication } from '../../src/server/app.js';
+import { createWorkspaceHost } from '../../src/server/workspaces.js';
 import type { RuntimeOptions } from '../../src/server/runtime.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
@@ -59,6 +59,11 @@ class BrowserFixtureRuntime {
   }
   private async run(text: string, turnId: string) {
     try {
+      if (text.includes('[chat-failure]')) {
+        this.options.onEvent({ type: 'item/agentMessage/delta', payload: { threadId: this.threadId, turnId, itemId: `failed-${turnId}`, delta: 'The fixture could not finish this turn.' } });
+        this.complete('failed');
+        return;
+      }
       if (text.includes('[computer-use-approval]')) {
         this.approvalId = turnId;
         this.options.onApproval({ id: turnId, method: 'mcpServer/elicitation/request', params: {
@@ -81,6 +86,10 @@ class BrowserFixtureRuntime {
         this.options.onEvent({ type: 'item/agentMessage/delta', payload: { threadId: this.threadId, turnId, itemId, delta: 'A **streamed** reply' } });
         await new Promise(resolve => setTimeout(resolve, 180));
         this.options.onEvent({ type: 'item/agentMessage/delta', payload: { threadId: this.threadId, turnId, itemId, delta: '\n\n```ts\nconst canvas = "shared";\n```' } });
+        if (text.includes('[project-background]')) {
+          await new Promise(resolve => setTimeout(resolve, 3000));
+          this.options.onEvent({ type: 'item/agentMessage/delta', payload: { threadId: this.threadId, turnId, itemId, delta: '\n\nBackground project reply finished.' } });
+        }
         if (!text.toLowerCase().includes('keep working')) this.complete();
         return;
       }
@@ -162,9 +171,35 @@ class BrowserFixtureRuntime {
 
 const directory = mkdtempSync(join(tmpdir(), 'canvagent-browser-'));
 const workspace = join(directory, 'browser-workspace');
+const secondWorkspace = join(directory, 'second-workspace');
 mkdirSync(workspace);
-const application = createApplication({ workspace, dataDir: join(directory, 'data'), port: 4319, distDir: resolve('dist'), runtimeFactory: configuration => new BrowserFixtureRuntime(configuration) as any });
-application.server.listen(4319, '127.0.0.1', () => console.log('Browser fixture ready: http://127.0.0.1:4319'));
+mkdirSync(secondWorkspace);
+for (const [folder, name] of [[workspace, 'browser-workspace'], [secondWorkspace, 'second-workspace']]) {
+  mkdirSync(join(folder, 'src'));
+  mkdirSync(join(folder, 'notes'));
+  writeFileSync(join(folder, 'README.md'), `# ${name}\n\nFiles belong to ${name}.\n`);
+  writeFileSync(join(folder, 'src', 'example.ts'), `export const greeting = "Hello from ${name}";\n`);
+  writeFileSync(join(folder, 'notes', 'draft.txt'), `Draft notes for ${name}.\n`);
+  writeFileSync(join(folder, 'notes', 'conflict.txt'), `Original text from ${name}.\n`);
+  writeFileSync(join(folder, 'pixel.png'), Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l9sAAAAASUVORK5CYII=', 'base64'));
+}
+const application = createWorkspaceHost({ workspace, dataRoot: join(directory, 'data'), port: 4319, distDir: resolve('dist'), runtimeFactory: configuration => new BrowserFixtureRuntime(configuration) as any });
+application.server.listen(4319, '127.0.0.1', async () => {
+  try {
+    const bootstrap = await fetch('http://127.0.0.1:4319/api/projects');
+    const cookie = bootstrap.headers.getSetCookie().map(value => value.split(';')[0]).join('; ');
+    const added = await fetch('http://127.0.0.1:4319/api/projects', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie }, body: JSON.stringify({ workspace: secondWorkspace }),
+    });
+    if (!added.ok) throw new Error(`Could not register the second fixture project: ${await added.text()}`);
+    console.log('Browser fixture ready: http://127.0.0.1:4319');
+  } catch (error) {
+    console.error(error);
+    await application.close();
+    rmSync(directory, { recursive: true, force: true });
+    process.exit(1);
+  }
+});
 for (const signal of ['SIGINT', 'SIGTERM'] as const) process.once(signal, () => {
   void application.close().finally(() => { rmSync(directory, { recursive: true, force: true }); process.exit(0); });
 });

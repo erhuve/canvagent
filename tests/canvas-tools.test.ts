@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
 import { ArtifactFiles } from '../src/server/artifacts.js';
-import { CanvasTools, canvasToolSpecs } from '../src/server/canvas-tools.js';
+import { CanvasTools, canvasToolSpecs, nativeShape } from '../src/server/canvas-tools.js';
 import { Store } from '../src/server/store.js';
 import type { Artifact } from '../src/shared/types.js';
 
@@ -135,6 +135,57 @@ test('capture sends committed state and requested bounds and returns actual imag
   assert.equal(calls, 1);
   assert.deepEqual(body(result), { revision: 0, bounds: region });
   assert.deepEqual(result.contentItems[1], { type: 'inputImage', imageUrl: dataURL });
+});
+
+test('read identifies live browser frames by their native embed URL without mislabeling links or other embeds', async t => {
+  const { tools, store } = await fixture(t);
+  const elements: Record<string, any>[] = [
+    { ...nativeShape('rectangle', {}, 'browser'), type: 'embeddable', link: 'http://localhost:3000', customData: { canvagent: { kind: 'browser', version: 1 } } },
+    { ...nativeShape('rectangle', {}, 'plain-embed'), type: 'embeddable', link: 'https://example.com/preview' },
+    { ...nativeShape('rectangle', {}, 'linked-shape'), link: 'https://example.com/' },
+    { ...nativeShape('rectangle', {}, 'other-embed'), type: 'embeddable', link: 'data:text/html,hello' },
+    { ...nativeShape('rectangle', {}, 'invalid-embed'), type: 'embeddable', link: 'invalid address' },
+  ];
+  assert.equal(store.mutate({ requestId: 'browser-frames', observedBoardRevision: 0,
+    operations: elements.map(element => ({ kind: 'create' as const, elementId: element.id, element })),
+  }, 'human').ok, true);
+  const read = body(await tools.call('read_canvas', {}));
+  assert.deepEqual(read.elements[0].browser, { kind: 'browser', url: 'http://localhost:3000/' });
+  assert.deepEqual(read.elements[1].browser, { kind: 'browser', url: 'https://example.com/preview' });
+  assert.equal(read.elements[0].type, 'embeddable');
+  assert.equal(read.elements[0].revision, 1);
+  assert.ok(read.elements.slice(2).every((element: any) => !Object.hasOwn(element, 'browser')));
+});
+
+test('captures disclose missing live page pixels for every browser frame in the crop, including frames outside selected IDs', async t => {
+  const { makeTools, store } = await fixture(t);
+  const region = { x: 100, y: 100, width: 200, height: 100 };
+  const dataURL = 'data:image/png;base64,aW1hZ2U=';
+  const tools = makeTools(async (board, requested) => ({ dataURL, bounds: requested!, revision: board.revision }));
+  const elements: Record<string, any>[] = [
+    { ...nativeShape('rectangle', { x: 50, y: 50, width: 500, height: 300 }, 'browser'), type: 'embeddable', link: 'http://localhost:3000/' },
+    { ...nativeShape('rectangle', { x: 1000, y: 1000 }, 'distant-browser'), type: 'embeddable', link: 'https://example.com/' },
+    { ...nativeShape('rectangle', { x: 100, y: 100, width: 100, height: 50 }, 'deleted-browser'), type: 'embeddable', link: 'https://deleted.example/' },
+    nativeShape('freedraw', { x: 130, y: 130, points: [[0, 0], [30, 20]] }, 'annotation'),
+  ];
+  assert.equal(store.mutate({ requestId: 'capture-browser-frames', observedBoardRevision: 0,
+    operations: elements.map(element => ({ kind: 'create' as const, elementId: element.id, element })),
+  }, 'human').ok, true);
+  assert.equal(store.mutate({ requestId: 'delete-browser-frame', observedBoardRevision: 1,
+    operations: [{ kind: 'delete', elementId: 'deleted-browser', expectedRevision: 1 }],
+  }, 'human').ok, true);
+  const result = await tools.call('capture_region', { region, elementIds: ['annotation'] });
+  assert.equal(result.success, true);
+  const metadata = body(result);
+  assert.deepEqual(metadata.browserFrames, [{ id: 'browser', kind: 'browser', url: 'http://localhost:3000/', livePixelsIncluded: false }]);
+  assert.match(metadata.warning, /Live webpage pixels are excluded/);
+  assert.match(metadata.warning, /Annotations and browser frame placeholders are shown/);
+  assert.match(metadata.warning, /page contents have not been observed/);
+  assert.deepEqual(result.contentItems[1], { type: 'inputImage', imageUrl: dataURL });
+
+  const emptyRegion = { x: -500, y: -500, width: 100, height: 100 };
+  const unrelated = await tools.call('capture_region', { region: emptyRegion });
+  assert.deepEqual(body(unrelated), { revision: 2, bounds: emptyRegion }, 'An unrelated browser frame does not change the normal capture contract.');
 });
 
 test('publication and attachment preserve bytes, link the board, and return the same retry response', async t => {

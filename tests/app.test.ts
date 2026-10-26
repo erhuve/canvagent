@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
-import { request as httpRequest } from 'node:http';
+import { createServer, request as httpRequest } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -737,6 +737,85 @@ test('invalid settings and incompatible capabilities retain prior values without
     }
   }
   assert.equal((await f.request('/api/sessions/missing-session/settings', { model: 'test-model' })).response.status, 404);
+});
+
+test('Vim defaults on and editor preferences persist without starting a runtime', async t => {
+  const f = await fixture(t);
+  assert.deepEqual((await f.request('/api/editor/settings')).body, { vimEnabled: true });
+  assert.equal((await f.request('/api/editor/settings', { vimEnabled: false }, {}, false)).response.status, 401);
+  assert.equal((await f.request('/api/editor/settings', { vimEnabled: false })).response.status, 200);
+  assert.equal((await f.request('/api/editor/settings', { vimEnabled: 'yes' })).response.status, 400);
+  assert.deepEqual((await f.request('/api/editor/settings')).body, { vimEnabled: false });
+  assert.equal(f.runtimes.length, 0);
+  const dataDir = f.application.store.dataDir;
+  await f.application.close();
+  const reopened = createApplication({ workspace: f.workspace, dataDir, port: 0 });
+  try { assert.deepEqual(reopened.store.get('editorSettings'), { vimEnabled: false }); }
+  finally { await reopened.close(); }
+});
+
+test('layout settings require project authentication and reject invalid changes without losing saved sizes', async t => {
+  const f = await fixture(t);
+  const defaults = { sidebarWidth: 240, chatRatio: 0.85 / 2.35 };
+  assert.deepEqual((await f.request('/api/layout/settings')).body, defaults);
+  assert.equal((await f.request('/api/layout/settings', undefined, {}, false)).response.status, 401);
+  assert.equal((await f.request('/api/layout/settings', { sidebarWidth: 300, chatRatio: 0.5 }, {}, false)).response.status, 401);
+  assert.equal((await f.request('/api/layout/settings', undefined, { Origin: 'https://outside.example' })).response.status, 403);
+  assert.equal((await f.request('/api/layout/settings', { sidebarWidth: 300, chatRatio: 0.5 }, { Origin: 'https://outside.example' })).response.status, 403);
+  assert.deepEqual((await f.request('/api/layout/settings')).body, defaults);
+  for (const settings of [{ sidebarWidth: 180, chatRatio: 0.1 }, { sidebarWidth: 420, chatRatio: 0.9 }, { sidebarWidth: 305.5, chatRatio: 0.47 }]) {
+    const saved = await f.request('/api/layout/settings', settings);
+    assert.equal(saved.response.status, 200);
+    assert.deepEqual(saved.body, settings);
+  }
+  const expected = { sidebarWidth: 305.5, chatRatio: 0.47 };
+  for (const invalid of [null, {}, [], { sidebarWidth: 240 }, { chatRatio: 0.5 },
+    { sidebarWidth: '240', chatRatio: 0.5 }, { sidebarWidth: 240, chatRatio: '0.5' },
+    { sidebarWidth: 179.99, chatRatio: 0.5 }, { sidebarWidth: 420.01, chatRatio: 0.5 },
+    { sidebarWidth: 240, chatRatio: 0.099 }, { sidebarWidth: 240, chatRatio: 0.901 },
+    { ...expected, extra: true }]) {
+    assert.equal((await f.request('/api/layout/settings', invalid)).response.status, 400);
+    assert.deepEqual((await f.request('/api/layout/settings')).body, expected);
+  }
+  const cookie = f.bootstrap.response.headers.get('set-cookie')!.split(';')[0];
+  for (const body of ['{"sidebarWidth":1e309,"chatRatio":0.5}', '{"sidebarWidth":240,"chatRatio":-1e309}']) {
+    const response = await fetch(`${f.base}/api/layout/settings`, { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body });
+    assert.equal(response.status, 400);
+    assert.deepEqual((await f.request('/api/layout/settings')).body, expected);
+  }
+  assert.deepEqual(f.application.store.get('layoutSettings'), expected);
+  assert.equal(f.runtimes.length, 0);
+});
+
+test('layout settings persist per workspace when the local service restarts on a different port', async t => {
+  const f = await fixture(t);
+  const other = await fixture(t);
+  const settings = { sidebarWidth: 320, chatRatio: 0.44 };
+  assert.equal((await f.request('/api/layout/settings', settings)).response.status, 200);
+  assert.deepEqual((await other.request('/api/layout/settings')).body, { sidebarWidth: 240, chatRatio: 0.85 / 2.35 });
+  const dataDir = f.application.store.dataDir;
+  const previousPort = Number(new URL(f.base).port);
+  await f.application.close();
+  // Reserve the previous address so the restart must use a different port.
+  const reserved = createServer();
+  await new Promise<void>(resolve => reserved.listen(previousPort, '127.0.0.1', resolve));
+  const reopened = createApplication({ workspace: f.workspace, dataDir, port: 0 });
+  try {
+    await new Promise<void>(resolve => reopened.server.listen(0, '127.0.0.1', resolve));
+    const address = reopened.server.address(); assert.ok(address && typeof address !== 'string');
+    assert.notEqual(address.port, previousPort);
+    const base = `http://127.0.0.1:${address.port}`;
+    const bootstrap = await fetch(`${base}/api/state`);
+    const cookie = bootstrap.headers.get('set-cookie')!.split(';')[0];
+    const restored = await fetch(`${base}/api/layout/settings`, { headers: { cookie } });
+    assert.equal(restored.status, 200);
+    assert.deepEqual(await restored.json(), settings);
+    assert.deepEqual(reopened.store.get('layoutSettings'), settings);
+    assert.deepEqual((await other.request('/api/layout/settings')).body, { sidebarWidth: 240, chatRatio: 0.85 / 2.35 });
+  } finally {
+    await reopened.close();
+    await new Promise<void>(resolve => reserved.close(() => resolve()));
+  }
 });
 
 test('session settings and workspace defaults survive restart without being merged into one another', async t => {

@@ -17,10 +17,31 @@ import { defaultAgentSettings, type AgentSettings } from "../shared/settings";
 import { AgentSettingsControls } from "./AgentSettings";
 import { errorMessage } from "./api";
 import { BrandMark, Icon } from "./icons";
-import type { AppState, Message, Session } from "./types";
+import { PaneResizeHandle } from "./PaneResizeHandle";
+import { usePaneLayout } from "./usePaneLayout";
+import { Notifications } from './Notifications';
+import type { NotificationsController } from './useNotifications';
+import type { AppState, Message, ProjectSummary, Session } from "./types";
 
 const activeStatuses = new Set(["running", "starting", "awaiting_approval"]);
-const titleFor = (session?: Session) => !session || session.title === "New session" ? "New conversation" : session.title;
+const titleFor = (session?: Pick<Session, "title">) => !session || session.title === "New session" ? "New conversation" : session.title;
+
+function readDraft(id: string) {
+  try { return sessionStorage.getItem(`canvagent:draft:${id}`) ?? ""; } catch { return ""; }
+}
+function writeDraft(id: string, text: string) {
+  try {
+    if (text) sessionStorage.setItem(`canvagent:draft:${id}`, text);
+    else sessionStorage.removeItem(`canvagent:draft:${id}`);
+  } catch { /* An unavailable browser storage must not prevent conversation. */ }
+}
+
+function RunStatus({ status }: { status?: Session["status"] }) {
+  if (!status || !activeStatuses.has(status)) return null;
+  const approval = status === "awaiting_approval";
+  const label = approval ? "Needs approval" : "Working";
+  return <span className={`thread-run-status ${approval ? "needs-approval" : ""}`} role="status" aria-label={label} title={label}><span className={approval ? "status-dot" : "working-spinner"} /></span>;
+}
 
 // The server remains the source of truth for messages and run state. This
 // adapter only projects saved Codex messages into assistant-ui's view model.
@@ -59,12 +80,10 @@ function ConversationItem({ disabled, sessions }: { disabled: boolean; sessions:
   const title = useAuiState(s => s.threadListItem.title ?? "New conversation");
   const id = useAuiState(s => s.threadListItem.id);
   const status = sessions.find(session => session.id === id)?.status;
-  const working = !!status && activeStatuses.has(status);
-  const statusLabel = status === "awaiting_approval" ? "Needs approval" : "Working";
   return <ThreadListItemPrimitive.Root className="thread-list-item">
     <ThreadListItemPrimitive.Trigger className="thread-list-trigger" aria-label={`Open conversation: ${title}`} disabled={disabled}>
       <Icon name="chat" size={15} /><ThreadListItemPrimitive.Title fallback="New conversation" />
-      {working && <span className={`thread-run-status ${status === "awaiting_approval" ? "needs-approval" : ""}`} role="status" aria-label={statusLabel} title={statusLabel}><span className={status === "awaiting_approval" ? "status-dot" : "working-spinner"} /></span>}
+      <RunStatus status={status} />
     </ThreadListItemPrimitive.Trigger>
   </ThreadListItemPrimitive.Root>;
 }
@@ -90,6 +109,9 @@ type WorkspaceProps = {
   onError: (message: string) => void;
   onDismissNotice: () => void;
   onOpenWorkspace: () => void;
+  projects: ProjectSummary[];
+  notifications: NotificationsController;
+  onActivateProject: (id: string, sessionId?: string) => Promise<void>;
   sessionContent: ReactNode;
   children: ReactNode;
 };
@@ -147,9 +169,13 @@ function Composer({ props, running, ready, inputRef }: {
 
 export function ChatWorkspace(props: WorkspaceProps) {
   const { state } = props;
+  const paneLayout = usePaneLayout(state?.project.workspace, props.onError);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [mobilePane, setMobilePane] = useState<"chat" | "canvas">("chat");
   const [activityOpen, setActivityOpen] = useState(false);
+  const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(() => {
+    try { return new Set(JSON.parse(localStorage.getItem("canvagent:collapsed-projects") ?? "[]")); } catch { return new Set(); }
+  });
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const runtimeRef = useRef<AssistantRuntime>();
   const drafts = useRef(new Map<string, string>());
@@ -162,7 +188,11 @@ export function ChatWorkspace(props: WorkspaceProps) {
     id: item.id, title: titleFor(item), status: "regular" as const,
   })), [state?.sessions]);
   const saveDraft = () => {
-    if (session) drafts.current.set(session.id, runtimeRef.current?.thread.composer.getState().text ?? "");
+    if (session) {
+      const text = runtimeRef.current?.thread.composer.getState().text ?? "";
+      drafts.current.set(session.id, text);
+      writeDraft(session.id, text);
+    }
   };
   const sendMessage = async (text: string) => {
     const targetId = session?.id;
@@ -186,7 +216,10 @@ export function ChatWorkspace(props: WorkspaceProps) {
         // rejects the send, without overwriting anything typed meanwhile.
         const composer = runtimeRef.current?.thread.composer;
         if (visibleSessionId.current === targetId && composer && !composer.getState().text.trim()) composer.setText(text);
-        else if (targetId && !drafts.current.get(targetId)?.trim()) drafts.current.set(targetId, text);
+        else if (targetId && !drafts.current.get(targetId)?.trim()) {
+          drafts.current.set(targetId, text);
+          writeDraft(targetId, text);
+        }
         props.onError(errorMessage(error));
       }
     },
@@ -202,7 +235,15 @@ export function ChatWorkspace(props: WorkspaceProps) {
   runtimeRef.current = runtime;
 
   useEffect(() => {
-    runtime.thread.composer.setText(session ? drafts.current.get(session.id) ?? "" : "");
+    runtime.thread.composer.setText(session ? drafts.current.get(session.id) ?? readDraft(session.id) : "");
+    if (!session) return;
+    const id = session.id;
+    const persist = () => {
+      const text = runtime.thread.composer.getState().text;
+      drafts.current.set(id, text);
+      writeDraft(id, text);
+    };
+    return runtime.thread.composer.subscribe(persist);
   }, [session?.id, runtime]);
 
   useEffect(() => {
@@ -219,32 +260,71 @@ export function ChatWorkspace(props: WorkspaceProps) {
     return () => window.removeEventListener("keydown", close);
   }, [sidebarOpen]);
 
+  useEffect(() => {
+    const show = () => { saveDraft(); setMobilePane("chat"); setSidebarOpen(false); };
+    window.addEventListener('canvagent:show-conversation', show);
+    return () => window.removeEventListener('canvagent:show-conversation', show);
+  });
+
   const navigationBusy = !state || props.sessionBusy;
   const activities = session?.activities ?? [];
   const activeTool = [...activities].reverse().find(item => item.status === "running" || item.status === "in_progress");
   const suggest = (text: string) => { runtime.thread.composer.setText(text); inputRef.current?.focus(); };
+  const activeProject = props.projects.find(project => project.workspace === state?.project.workspace);
+  const sidebarProjects = props.projects.map(project => project.id === activeProject?.id && state ? { ...project, sessions: state.sessions } : project);
+  const toggleProject = (id: string) => {
+    setCollapsedProjects(previous => {
+      const next = new Set(previous);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      try { localStorage.setItem("canvagent:collapsed-projects", JSON.stringify([...next])); } catch { /* Optional preference. */ }
+      return next;
+    });
+  };
+  const openProject = (id: string, sessionId?: string) => {
+    saveDraft();
+    void props.onActivateProject(id, sessionId);
+    setSidebarOpen(false);
+  };
 
   return <AssistantRuntimeProvider runtime={runtime}>
-    <div className={`app-shell ${sidebarOpen ? "sidebar-open" : ""}`}>
+    <div ref={paneLayout.shellRef} style={paneLayout.style} className={`app-shell ${sidebarOpen ? "sidebar-open" : ""} ${paneLayout.resizing ? "layout-resize-active" : ""}`}>
+      {paneLayout.resizing && <div className="layout-resize-shield" aria-hidden="true" />}
       {sidebarOpen && <button className="sidebar-scrim" aria-label="Close conversation history" onClick={() => setSidebarOpen(false)} />}
-      <aside className="app-sidebar" aria-label="Conversation history">
+      <aside id="workspace-sidebar" className="app-sidebar" aria-label="Conversation history">
         <div className="sidebar-brand"><a href="/" aria-label="Canvagent home"><span className="brand-icon"><BrandMark size={25} /></span>canvagent</a><button className="icon-button sidebar-close" aria-label="Close sidebar" onClick={() => setSidebarOpen(false)}><Icon name="close" size={17} /></button></div>
         <ThreadListPrimitive.Root className="thread-list">
           <ThreadListPrimitive.New className="new-conversation" disabled={navigationBusy} aria-label="New conversation"><Icon name="compose" size={17} />New conversation<span>＋</span></ThreadListPrimitive.New>
-          <span className="sidebar-label">Conversations</span>
-          <div className="thread-list-items"><ThreadListPrimitive.Items>{() => <ConversationItem disabled={navigationBusy} sessions={state?.sessions ?? []} />}</ThreadListPrimitive.Items></div>
+          <div className="sidebar-section-heading"><span className="sidebar-label">Projects</span><button className="icon-button" aria-label="Add project" title="Add project" disabled={navigationBusy} onClick={() => { saveDraft(); props.onOpenWorkspace(); }}><Icon name="plus" size={15} /></button></div>
+          <div className="thread-list-items project-list">
+            {sidebarProjects.map(project => {
+              const active = project.id === activeProject?.id;
+              const expanded = !collapsedProjects.has(project.id);
+              return <section className="sidebar-project" key={project.id} aria-label={`Project: ${project.name}`}>
+                <div className={`project-row ${active ? "active" : ""}`}>
+                  <button className="project-disclosure" aria-label={`${expanded ? "Collapse" : "Expand"} project: ${project.name}`} aria-expanded={expanded} onClick={() => toggleProject(project.id)}><Icon name="chevron" size={13} className={expanded ? "" : "project-collapsed"} /></button>
+                  <button className="project-trigger" aria-label={`Open project: ${project.name}`} aria-current={active ? "page" : undefined} title={project.available === false ? `${project.workspace} · Folder unavailable` : project.workspace} disabled={navigationBusy || project.available === false} onClick={() => openProject(project.id)}><Icon name="folder" size={16} /><span>{project.name}</span>{!expanded && <RunStatus status={project.sessions.some(item => item.status === "awaiting_approval") ? "awaiting_approval" : project.sessions.some(item => activeStatuses.has(item.status)) ? "running" : "idle"} />}{project.available === false && <Icon name="warning" size={13} />}</button>
+                </div>
+                {expanded && <div className="project-conversations">
+                  {active ? <ThreadListPrimitive.Items>{() => <ConversationItem disabled={navigationBusy} sessions={state?.sessions ?? []} />}</ThreadListPrimitive.Items> : [...project.sessions].reverse().map(item => <div className="thread-list-item" key={item.id}><button className="thread-list-trigger" aria-label={`Open conversation: ${titleFor(item)}`} disabled={navigationBusy || project.available === false} onClick={() => openProject(project.id, item.id)}><Icon name="chat" size={14} /><span>{titleFor(item)}</span><RunStatus status={item.status} /></button></div>)}
+                  {project.available === false && <span className="project-unavailable">Folder unavailable</span>}
+                </div>}
+              </section>;
+            })}
+            {!sidebarProjects.length && <ThreadListPrimitive.Items>{() => <ConversationItem disabled={navigationBusy} sessions={state?.sessions ?? []} />}</ThreadListPrimitive.Items>}
+          </div>
         </ThreadListPrimitive.Root>
-        <div className="sidebar-workspace" title={state?.project.workspace}><span className="workspace-icon"><Icon name="folder" size={17} /></span><div><strong>{state?.project.name ?? "Local workspace"}</strong><span>Local workspace</span></div>{state?.project.desktop ? <button className="icon-button" aria-label="Open workspace" title="Open another workspace" onClick={props.onOpenWorkspace}><Icon name="compose" size={16} /></button> : <span className={`status-dot ${props.online ? "online" : ""}`} />}</div>
+        <div className="sidebar-workspace" title={state?.project.workspace}><span className="workspace-icon"><Icon name="folder" size={17} /></span><div><strong>{state?.project.name ?? "Local workspace"}</strong><span>Local workspace</span></div><span className={`status-dot ${props.online ? "online" : ""}`} /></div>
       </aside>
+      <PaneResizeHandle className="sidebar-resize-handle" label="Resize sidebar" controls="workspace-sidebar" {...paneLayout.sidebar} onCommit={paneLayout.commit} onDraggingChange={paneLayout.dragging} />
 
       <div className={`main-workspace mobile-${mobilePane}`}>
         <header className="app-header">
           <div className="header-title"><button className="icon-button sidebar-toggle" aria-label="Open conversation history" onClick={() => setSidebarOpen(true)}><Icon name="sidebar" size={19} /></button><span className="header-project">{state?.project.name ?? "canvagent"}</span><span className="header-slash">/</span><span className="header-conversation">{titleFor(session)}</span></div>
-          <button className={`runtime-status ${ready ? "ready" : "not-ready"}`} onClick={() => !ready && props.onConnect()} disabled={props.connecting} title={state?.runtime.error || `Codex ${state?.runtime.version ?? "runtime"}`}><span className={`status-dot ${props.connecting ? "pulse" : ""}`} />{props.connecting ? "Connecting…" : ready ? "Codex connected" : "Connect Codex"}{!ready && <Icon name="reconnect" size={13} />}</button>
+          <div className="header-actions"><Notifications controller={props.notifications} disabled={navigationBusy} onOpen={async item => { saveDraft(); setMobilePane("chat"); await props.notifications.open(item); }} /><button className={`runtime-status ${ready ? "ready" : "not-ready"}`} onClick={() => !ready && props.onConnect()} disabled={props.connecting} title={state?.runtime.error || `Codex ${state?.runtime.version ?? "runtime"}`}><span className={`status-dot ${props.connecting ? "pulse" : ""}`} />{props.connecting ? "Connecting…" : ready ? "Codex connected" : "Connect Codex"}{!ready && <Icon name="reconnect" size={13} />}</button></div>
         </header>
-        <nav className="mobile-tabs" aria-label="Workspace view"><button className={mobilePane === "chat" ? "active" : ""} onClick={() => setMobilePane("chat")}><Icon name="chat" size={16} />Conversation</button><button className={mobilePane === "canvas" ? "active" : ""} onClick={() => setMobilePane("canvas")}><Icon name="board" size={16} />Canvas</button></nav>
-        <main className="workspace-layout">
-          <section className="conversation-pane" aria-label="Agent conversation">
+        <nav className="mobile-tabs" aria-label="Workspace view"><button className={mobilePane === "chat" ? "active" : ""} onClick={() => setMobilePane("chat")}><Icon name="chat" size={16} />Conversation</button><button className={mobilePane === "canvas" ? "active" : ""} onClick={() => setMobilePane("canvas")}><Icon name="board" size={16} />Workspace</button></nav>
+        <main ref={paneLayout.splitRef} className="workspace-layout">
+          <section id="workspace-conversation" className="conversation-pane" aria-label="Agent conversation">
             <ThreadPrimitive.Root className="chat-thread">
               <ThreadPrimitive.Viewport className="transcript">
                 {!session?.messages.length && !running && <div className="welcome">
@@ -259,10 +339,11 @@ export function ChatWorkspace(props: WorkspaceProps) {
                 {props.sessionContent}
                 <ThreadPrimitive.ScrollToBottom className="scroll-to-bottom" aria-label="Scroll to latest message"><Icon name="down" size={17} /></ThreadPrimitive.ScrollToBottom>
               </ThreadPrimitive.Viewport>
-              {!ready && state && <div className="connection-note"><Icon name="info" size={15} /><span>{state.runtime.error || (state.runtime.connected ? "Sign in with codex login, then reconnect." : "Connect Codex to start a conversation.")}</span></div>}
+              {!ready && state && <div className="connection-note"><Icon name="info" size={15} /><span>{props.connecting ? "Connecting to Codex with your existing login…" : state.runtime.error || (state.runtime.connected ? "Sign in with codex login, then reconnect." : "Select Connect Codex to retry.")}</span></div>}
               <Composer props={{ ...props, onSend: sendMessage }} running={running} ready={ready} inputRef={inputRef} />
             </ThreadPrimitive.Root>
           </section>
+          <PaneResizeHandle className="workspace-resize-handle" label="Resize chat and workspace" controls="workspace-conversation" {...paneLayout.chat} onCommit={paneLayout.commit} onDraggingChange={paneLayout.dragging} />
           {props.children}
         </main>
       </div>

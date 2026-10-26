@@ -1,8 +1,8 @@
 {
   "identifier": "desktop-controls",
-  "description": "Workspace selection and graceful shutdown for the main desktop window. The browser has no shell or general filesystem permissions.",
-  "windows": ["main"],
+  "description": "Desktop controls belong exclusively to the main app webview. Embedded browser pages receive no capabilities.",
+  "webviews": ["main"],
   "local": true,
   "remote": { "urls": ["http://127.0.0.1:*"] },
-  "permissions": ["allow-desktop-info", "allow-choose-workspace", "allow-reopen-workspace", "allow-quit-application"]
+  "permissions": ["allow-desktop-info", "allow-choose-workspace", "allow-reopen-workspace", "allow-remember-workspace", "allow-quit-application", "allow-notification-permission", "allow-request-notification-permission", "allow-send-notification", "allow-focus-application", "notification:allow-is-permission-granted", "allow-browser-open", "allow-browser-bounds", "allow-browser-hide", "allow-browser-close", "allow-browser-action", "allow-browser-state", "allow-browser-annotate"]
 }

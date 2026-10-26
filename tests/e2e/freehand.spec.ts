@@ -1,19 +1,19 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { expect, test, type Page } from '@playwright/test';
 
-async function state(page: Page) { return page.evaluate(async () => (await fetch('/api/state')).json()); }
+async function state(page: Page) { return page.evaluate(async () => (await fetch(new URL('api/state', location.href))).json()); }
 
 test('agent freehand strokes render as ink, remain editable as a group, and survive export and reload', async ({ page }) => {
   const errors: string[] = [];
   const captures: any[] = [];
   page.on('pageerror', error => errors.push(error.message));
-  page.on('request', request => { if (new URL(request.url()).pathname === '/api/capture-result') captures.push(request.postDataJSON()); });
+  page.on('request', request => { if (new URL(request.url()).pathname.endsWith('/api/capture-result')) captures.push(request.postDataJSON()); });
   await page.goto('/');
   await expect(page.locator('.excalidraw canvas.interactive')).toBeVisible();
   const initial = await state(page);
   const live = initial.board.elements.filter((element: any) => !element.isDeleted);
   if (live.length) await page.evaluate(async ({ revision, operations }) => {
-    const response = await fetch('/api/board/mutate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ requestId: crypto.randomUUID(), observedBoardRevision: revision, operations }) });
+    const response = await fetch(new URL('api/board/mutate', location.href), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ requestId: crypto.randomUUID(), observedBoardRevision: revision, operations }) });
     if (!response.ok) throw new Error('Could not clear the test canvas.');
   }, { revision: initial.board.revision, operations: live.map((element: any) => ({ kind: 'delete', elementId: element.id, expectedRevision: initial.board.metadata[element.id].revision })) });
   const previousSession = (await state(page)).activeSessionId;
@@ -44,7 +44,6 @@ test('agent freehand strokes render as ink, remain editable as a group, and surv
   expect(pixels.pink).toBeGreaterThan(500);
   expect(pixels.green).toBeGreaterThan(100);
   await writeFile('test-results/freehand-capture.png', Buffer.from(captures[0].dataURL.split(',')[1], 'base64'));
-  await page.screenshot({ path: 'test-results/freehand-canvas.png' });
   const drawn = await state(page);
   const strokes = drawn.board.elements.filter((element: any) => !element.isDeleted && element.type === 'freedraw');
   expect(strokes).toHaveLength(2);

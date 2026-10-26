@@ -2,9 +2,15 @@ import type { CSSProperties } from "react";
 
 const paths: Record<string, string> = {
   plus: "M12 5v14M5 12h14",
+  bell: "M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4",
   arrow: "M12 19V5m-6 6 6-6 6 6",
   chevron: "m8 10 4 4 4-4",
   folder: "M3 7a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v9H3Z",
+  file: "M14 3H5v18h14V8Zm0 0v5h5M8 12h8m-8 4h6",
+  save: "M5 3h12l4 4v14H3V3Zm2 0v6h10V3M7 21v-7h10v7",
+  globe: "M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0ZM3 12h18M12 3c5 5 5 13 0 18-5-5-5-13 0-18",
+  left: "M20 12H4m6-6-6 6 6 6",
+  search: "M21 21l-5-5m2-6a8 8 0 1 1-16 0 8 8 0 0 1 16 0",
   history: "M3 10a9 9 0 1 1 2 8M3 4v6h6m3-3v6l4 2",
   board: "M4 4h16v16H4zM9 4v16M9 10h11",
   select: "m5 3 14 9-7 1-3 7Z",

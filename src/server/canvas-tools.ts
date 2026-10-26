@@ -41,6 +41,14 @@ const publishSchema = z.object({ requestId: id, sourcePath: z.string().min(1).ma
 const attachSchema = z.object({ requestId: id, artifactId: id, x: coordinate, y: coordinate, width: positive.optional() });
 
 const isPath = (shape: string) => ['freedraw', 'line', 'arrow'].includes(shape);
+function browserFrame(element: any) {
+  if (element.type !== 'embeddable' || typeof element.link !== 'string') return undefined;
+  try {
+    const url = new URL(element.link);
+    if (!['http:', 'https:'].includes(url.protocol)) return undefined;
+    return { kind: 'browser' as const, url: url.href };
+  } catch { return undefined; }
+}
 type Point = [number, number];
 function pointBounds(points: readonly Point[]) {
   return points.reduce(([left, top, right, bottom], [x, y]) => [Math.min(left, x), Math.min(top, y), Math.max(right, x), Math.max(bottom, y)], [Infinity, Infinity, -Infinity, -Infinity]);
@@ -100,8 +108,8 @@ function toolSpec(name: string, description: string, schema: z.ZodType) {
   return { name, description, inputSchema };
 }
 export const canvasToolSpecs = [
-  toolSpec('read_canvas', 'Inspect the shared canvas. Returns current committed objects with IDs, coordinates, text and service revisions. Read before describing or updating the board. Scope overview returns a bounded overview; elements and region focus the result.', readSchema),
-  toolSpec('capture_region', 'See a PNG of the current committed canvas or selected region. Use this for sketches, screenshots, handwriting and visual claims. Returns image content. Requires the browser canvas to be connected.', captureSchema),
+  toolSpec('read_canvas', 'Inspect the shared canvas. Returns current committed objects with IDs, coordinates, text, browser frame URLs and service revisions. Read before describing or updating the board. Scope overview returns a bounded overview; elements and region focus the result.', readSchema),
+  toolSpec('capture_region', 'See a PNG of the current committed canvas or selected region. Use this for sketches, screenshots, handwriting and visual claims. Live browser frames export placeholders; their webpage pixels are excluded. Returns image content. Requires the browser canvas to be connected.', captureSchema),
   toolSpec('apply_canvas_ops', 'Draw anything directly on the shared canvas with native editable elements. Use shape freedraw and arbitrary points for freehand strokes; line or arrow with points for custom paths. Points are [dx,dy] offsets from x,y; omit width/height when supplying points. Close a line path by repeating its first point to make a filled outline. Set colours, strokeWidth, pressures (freedraw), opacity and groupIds as needed. No templates or fixed motifs are required. Read/capture the board, draw, then capture to inspect and refine. Use a unique requestId; updates/deletes require expectedRevision from read_canvas. Batch related strokes and preserve human work.', applySchema),
   toolSpec('publish_artifact', 'Publish a generated file from this project workspace into durable managed storage. Returns an artifactId for attach_artifact. Use a workspace-relative sourcePath and a unique requestId.', publishSchema),
   toolSpec('attach_artifact', 'Place a published artifact on the board at x,y. Raster images become editable native image previews; other files get a labeled download link. Use the artifactId from publish_artifact.', attachSchema),
@@ -113,6 +121,7 @@ export class CanvasTools {
     store: Store;
     artifactFiles: ArtifactFiles;
     sessionId: () => string | undefined;
+    basePath?: string;
     changed: (result: any, actor: string) => void;
     capture: (board: any, region?: Region) => Promise<{ dataURL: string; bounds: Region; revision: number }>;
   }) {}
@@ -134,8 +143,20 @@ export class CanvasTools {
         const elements = board.elements.filter((e: any) => !e.isDeleted && (!args.elementIds?.length || args.elementIds.includes(e.id)));
         const region = args.region ?? boundsOf(elements);
         const capture = await this.options.capture(board, region);
+        // A capture is a crop of the complete board, including nearby objects
+        // when elementIds supplied its bounds. Iframes are exported as native
+        // placeholders; the PNG does not expose the live page's rendered pixels.
+        const browserFrames = board.elements.filter((element: any) => {
+          if (element.isDeleted || !browserFrame(element)) return false;
+          const [left, top, right, bottom] = elementBounds(element);
+          const margin = Math.max(8, (element.strokeWidth || 0) * 2);
+          const bounds = capture.bounds;
+          return right + margin >= bounds.x && left - margin <= bounds.x + bounds.width && bottom + margin >= bounds.y && top - margin <= bounds.y + bounds.height;
+        }).map((element: any) => ({ id: element.id, ...browserFrame(element), livePixelsIncluded: false }));
         return { success: true, contentItems: [
-          { type: 'inputText', text: JSON.stringify({ revision: capture.revision, bounds: capture.bounds }) },
+          { type: 'inputText', text: JSON.stringify({ revision: capture.revision, bounds: capture.bounds,
+            ...(browserFrames.length ? { browserFrames, warning: 'Live webpage pixels are excluded from this capture. Annotations and browser frame placeholders are shown. The page contents have not been observed.' } : {}),
+          }) },
           { type: 'inputImage', imageUrl: capture.dataURL },
         ] };
       }
@@ -158,6 +179,7 @@ export class CanvasTools {
             strokeWidth: e.strokeWidth, strokeStyle: e.strokeStyle, fillStyle: e.fillStyle,
             roughness: e.roughness, opacity: e.opacity, angle: e.angle, groupIds: e.groupIds,
             fileId: e.fileId, link: e.link, customData: e.customData,
+            ...(browserFrame(e) ? { browser: browserFrame(e) } : {}),
           })), missingIds, truncated: elements.length > 200,
           requiresRead: args.scope === 'changes' && args.sinceRevision !== board.revision,
           note: args.scope === 'changes' ? 'Returns current objects; detailed historical deltas are not retained. Deleted selected IDs appear in missingIds.' : undefined,
@@ -248,7 +270,7 @@ export class CanvasTools {
           const width = args.width ?? Math.min(dimensions.width, 640);
           Object.assign(element, { type: 'image', fileId, width, height: width * dimensions.height / dimensions.width, scale: [1, 1], status: 'saved', crop: null, roundness: null });
         }
-        element.link = `/api/artifacts/${artifact.id}`;
+        element.link = `${this.options.basePath ?? ''}/api/artifacts/${artifact.id}`;
         const lastIndex = store.board().elements.reduce<string | null>((last, item) => typeof item.index === 'string' && (!last || item.index > last) ? item.index : last, null);
         element.index = generateKeyBetween(lastIndex, null);
         element.customData = { canvagent: { artifactId: artifact.id, author: 'agent' } };

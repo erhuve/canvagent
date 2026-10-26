@@ -1,0 +1,12 @@
+.browser-annotate-toggle { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-height: 28px; padding: 4px 7px; border-radius: 5px; font-size: 10px; white-space: nowrap; color: #858591; }
+.browser-annotate-toggle:hover, .browser-annotate-toggle[aria-pressed=true] { background: #eeedf8; color: #65528e; }
+.browser-annotation-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 3px; padding: 5px 10px; background: #fcfbff; border-bottom: 1px solid var(--line); flex-shrink: 0; min-height: 36px; }
+.browser-annotation-toolbar button { display: inline-flex; align-items: center; justify-content: center; width: 25px; height: 25px; border-radius: 5px; color: #85808e; border: 1px solid transparent; font-size: 20px; }
+.browser-annotation-toolbar button:hover { background: #f0edf8; }
+.browser-annotation-toolbar button[aria-pressed=true] { background: #ece8f8; border-color: #d7cdec; color: #69568b; }
+.browser-annotation-toolbar .annotation-color { width: 21px; height: 24px; }
+.annotation-color i { display: block; width: 11px; height: 11px; border-radius: 50%; }
+.annotation-tool-separator { height: 16px; width: 1px; background: #e7e2ee; margin: 0 3px; }
+.annotation-count { margin-left: auto; font-size: 9px; white-space: nowrap; color: #a49bad; }
+.browser-viewport { overflow: hidden; }
+@media (max-width: 700px) { .browser-annotate-toggle span { display: none; } }
