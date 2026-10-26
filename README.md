@@ -5,17 +5,17 @@
 
 # canvagent
 
-Canvagent is a local Codex harness with a persistent Excalidraw canvas shared by you and your agent. Chat about a project, sketch an idea, drop in a screenshot, and let Codex inspect and annotate the same board while it works.
+Canvagent is a local agent workspace with a persistent Excalidraw canvas shared by you and your agent. Bring Codex, Claude Code, OpenCode, another ACP harness, or a model API. Chat about a project, sketch an idea, drop in a screenshot, and let your agent inspect and annotate the same board while it works.
 
 ![Canvagent desktop workspace with Codex chat, a shared design canvas, and an integrated terminal](docs/images/canvagent-workspace.png)
 
-*Plan, build, and review with Codex beside a canvas you can both edit.*
+*Plan, build, and review with your preferred agent beside a canvas you can both edit.*
 
 **Status:** the local application is implemented. Codex CLI **0.159.2** accepted live initialization, thread creation, and turn submission; expired login credentials prevented inference. [Runtime evidence and remaining checks](docs/implementation.md#runtime-status) distinguish verified protocol behavior from model-driven canvas behavior still to verify.
 
 ## Run locally
 
-Use **Node.js 24 or newer** and install [Codex CLI](https://developers.openai.com/codex/cli/) on your `PATH`. Sign in through Codex's normal login flow:
+Use **Node.js 24 or newer**. For the default agent, install [Codex CLI](https://developers.openai.com/codex/cli/) on your `PATH`. Sign in through Codex's normal login flow:
 
 ```sh
 codex login
@@ -24,7 +24,7 @@ npm run build
 npm start -- --workspace /absolute/path/to/your/project
 ```
 
-Open **http://127.0.0.1:4317**. Canvagent connects to Codex automatically using your existing login and available models. If authentication needs renewal, run `codex login` and use **Connect Codex** to retry. Connecting does not start or replay a task. Keep the browser open when asking the agent to inspect drawings or screenshots: canvas captures render in that browser.
+Open **http://127.0.0.1:4317**. Choose an agent beside the message composer. The initial default is Codex, which connects automatically using your existing login and available models. If authentication needs renewal, run `codex login` and use **Retry** beside the composer. Connecting does not start or replay a task. Keep the browser open when asking the agent to inspect drawings or screenshots: canvas captures render in that browser.
 
 To choose the saved-data directory or local port:
 
@@ -34,9 +34,19 @@ npm start -- --workspace /absolute/path/to/project --data-dir /absolute/path/to/
 
 Run these commands from the Canvagent checkout. The workspace defaults to the current directory when omitted. The service listens on `127.0.0.1`.
 
+## Bring your own agent
+
+Choose **Codex**, **Claude Code**, **OpenCode**, or **Gemini CLI** in the composer. **Manage agents** lets you configure installed ACP harnesses, add a custom executable and argument array, or connect an **OpenAI compatible API** or **Anthropic API** using a model ID and API key. Authenticate through your harness before selecting it. Agent choice belongs to each conversation; switching agents after a conversation has history starts a new conversation and preserves the original session.
+
+Pasted API keys stay in server memory until restart; environment-variable references provide reusable credentials. Direct API agents can use the canvas and workspace tools. File changes and commands require explicit approval. Harnesses keep their own tools, permissions, and authentication. See [agent setup, capabilities, and limitations](docs/agents.md).
+
+The [Zed source review](docs/zed-research.md) covers ACP architecture and a broader feature matrix. The [roadmap](docs/roadmap.md) records what shipped and the next work on setup, worktrees, review, context, and workflows.
+
+Chat supports **@mentions**, visible context chips, and **pasted or dropped images**, including image-only messages. Attach files or selected lines from the editor, canvas objects, conversations, and artifacts, then inspect the exact context before sending. **Review changes** in the conversation shows saved before/after file diffs and affected canvas objects, with guarded file restoration. See [context, image, and review behavior](docs/context-and-review.md).
+
 ## Desktop app (Tauri)
 
-The desktop app opens with a native workspace folder picker and runs the same chat, Excalidraw editor, and Codex backend in a Tauri window. It bundles a standalone Node 24 runtime; installed-app users still need Codex CLI and its normal login, but do not need to install Node separately.
+The desktop app opens with a native workspace folder picker and runs the same chat, Excalidraw editor, and Codex backend in a Tauri window. It bundles a standalone Node 24 runtime; installed-app users need their chosen harness and login, or model API credentials, and do not need to install Node separately.
 
 To build or develop it, install the [Tauri platform prerequisites](https://v2.tauri.app/start/prerequisites/) and Rust 1.90 or later, then run:
 
@@ -84,7 +94,7 @@ On wider windows, drag the dividers beside the sidebar and between chat and the 
 
 Published outputs appear under **Files from this conversation**, collapsed by default with a file count. Click its header, or press Enter/Space when focused, to open the scrollable download list. Each conversation starts collapsed; new files preserve an already expanded list.
 
-The right side has **Canvas**, **Browser**, and **Files** tabs. Browser opens website URLs and local development servers beside chat, with back, forward, reload, and an address bar. Desktop uses a native embedded browser; the regular web interface uses an iframe, so sites that prohibit embedding require the desktop app. Browser pages have no access to desktop commands.
+The right side has **Canvas**, **Browser**, **Files**, and **Changes** tabs. Changes shows the current Git branch, changed files, staged and working-tree diffs, and untracked file previews. Select a file to review its diff and use Refresh after edits. Binary files and large diffs show explicit preview limits. This panel is read-only. Browser opens website URLs and local development servers beside chat, with back, forward, reload, and an address bar. Desktop uses a native embedded browser; the regular web interface uses an iframe, so sites that prohibit embedding require the desktop app. Browser pages have no access to desktop commands.
 
 In Browser, choose **Annotate** to draw temporary marks with a pen, highlighter, or rectangle tool and a choice of colors. Use **Undo** or **Clear** to adjust marks, and **Done** or **Escape** to resume browsing. Marks clear when a new page loads.
 
@@ -159,4 +169,4 @@ The editable logo source is [`public/brand/mark.svg`](public/brand/mark.svg). Ru
 - [Data models and contracts](docs/contracts.md)
 - [Adversarial review](docs/adversarial-review.md)
 
-External MCP clients, other agent providers, portable project export, human multiplayer, and hosted deployment remain follow-up work. Excalidraw is [MIT licensed](https://github.com/excalidraw/excalidraw/blob/master/LICENSE); agent usage follows Codex authentication and billing.
+External MCP clients, portable project export, human multiplayer, and hosted deployment remain follow-up work. Excalidraw is [MIT licensed](https://github.com/excalidraw/excalidraw/blob/master/LICENSE); agent usage follows the selected harness or model provider’s authentication and billing.

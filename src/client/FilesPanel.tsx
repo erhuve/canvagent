@@ -16,7 +16,7 @@ const fileName = (path: string) => path.split("/").at(-1) || path;
 const isDirty = (file: OpenFile) => file.kind === "text" && file.content !== file.saved;
 const imageFile = (path: string) => /\.(png|jpe?g|gif|webp|avif|ico|bmp)$/i.test(path);
 
-export const FilesPanel = forwardRef<FilesPanelHandle, { active: boolean; projectName: string; projectKey: string; command?: { id: number; kind: "open" | "find" | "search" | "palette" }; onError: (message: string) => void; onNeedsAttention: () => void }>(function FilesPanel({ active, projectName, projectKey, command, onError, onNeedsAttention }, ref) {
+export const FilesPanel = forwardRef<FilesPanelHandle, { active: boolean; projectName: string; projectKey: string; contextSessionId?: string; command?: { id: number; kind: "open" | "find" | "search" | "palette" }; onError: (message: string) => void; onNeedsAttention: () => void }>(function FilesPanel({ active, projectName, projectKey, contextSessionId, command, onError, onNeedsAttention }, ref) {
   const [directories, setDirectories] = useState<Record<string, Directory>>({});
   const [expanded, setExpanded] = useState(new Set<string>([""]));
   const [files, setFiles] = useState<OpenFile[]>([]);
@@ -29,6 +29,11 @@ export const FilesPanel = forwardRef<FilesPanelHandle, { active: boolean; projec
   const [guardOpen, setGuardOpen] = useState(false);
   const [guardError, setGuardError] = useState("");
   const [cursor, setCursor] = useState({ line: 1, column: 1 });
+  const [selection, setSelection] = useState<{ startLine: number; endLine: number }>();
+  const [attaching, setAttaching] = useState(false);
+  const attachPending = useRef(false);
+  const contextSession = useRef(contextSessionId);
+  contextSession.current = contextSessionId;
   const filesRef = useRef(files);
   filesRef.current = files;
   const guardResult = useRef<(result: boolean) => void>();
@@ -201,6 +206,22 @@ export const FilesPanel = forwardRef<FilesPanelHandle, { active: boolean; projec
       return false;
     }
   };
+  const attachFile = async (path: string, selectedLines?: { startLine: number; endLine: number }) => {
+    if (attachPending.current) return;
+    const file = filesRef.current.find(file => file.path === path);
+    if (!file || file.kind !== "text" || file.saving || loading === path || savingAll) return;
+    // Preserve the selected lines before saving causes cursor or model updates.
+    const range = selectedLines ? { ...selectedLines } : undefined;
+    const targetSession = contextSession.current;
+    attachPending.current = true; setAttaching(true);
+    try {
+      if (!await saveFile(path)) return;
+      if (contextSession.current !== targetSession) { onError("The file was saved. Return to the original conversation to attach this selection."); return; }
+      const latest = filesRef.current.find(file => file.path === path);
+      if (latest && isDirty(latest)) { onError("The file changed while attaching it. Save your latest edits and attach it again."); return; }
+      window.dispatchEvent(new CustomEvent("canvagent:attach-context", { detail: { reference: { kind: "file", path, ...range }, projectWorkspace: projectKey, sessionId: targetSession } }));
+    } finally { attachPending.current = false; setAttaching(false); }
+  };
   const reloadFile = async (path: string) => {
     await editor.current?.settleEdits();
     const file = filesRef.current.find(item => item.path === path);
@@ -283,9 +304,9 @@ export const FilesPanel = forwardRef<FilesPanelHandle, { active: boolean; projec
     <div className="file-workspace">
       {files.length > 0 && <div className="file-tabs" role="tablist" aria-label="Open files">{files.map(file => <div className={`file-tab ${activePath === file.path ? "active" : ""}`} key={file.path}><button role="tab" aria-selected={activePath === file.path} title={file.path} onClick={() => void openFile(file.path)}>{isDirty(file) && <span className="file-dirty-dot" />}<span>{fileName(file.path)}</span></button><button aria-label={`Close file: ${file.path}`} onClick={() => closeFile(file.path)}><Icon name="close" size={12} /></button></div>)}</div>}
       {current ? <>
-        <div className="file-editor-toolbar"><span title={current.path}>{current.path}</span><div>{current.kind === "text" && <><button className="toolbar-button" aria-label="Vim key bindings" aria-pressed={vimEnabled} title={vimEnabled ? "Disable Vim key bindings" : "Enable Vim key bindings"} disabled={vimSettingsBusy} onClick={() => void toggleVim()}>Vim {vimEnabled ? "on" : "off"}</button><button className="toolbar-button" aria-label="Find in file" title="Find in file (⌘F / Ctrl+F)" onClick={() => editor.current?.find()}><Icon name="search" size={14} /></button><button className="toolbar-button" aria-label="Editor commands" title="Editor commands (⌘⇧P / Ctrl+Shift+P)" onClick={() => editor.current?.commandPalette()}><Icon name="settings" size={14} /></button></>}<button className="toolbar-button" aria-label="Reload file" title="Reload file from disk" disabled={current.kind === "binary" || current.saving || !!loading} onClick={() => void reloadFile(current.path)}><Icon name="reconnect" size={14} /></button>{current.kind === "text" && <button className="file-save" disabled={!isDirty(current) || current.saving} onClick={() => void saveFile(current.path)}><Icon name="save" size={14} />{current.saving ? "Saving…" : "Save file"}</button>}</div></div>
+        <div className="file-editor-toolbar"><span title={current.path}>{current.path}</span><div>{current.kind === "text" && <><button className="toolbar-button" aria-label="Attach to chat" title={`${isDirty(current) ? "Save and attach" : "Attach"} ${selection ? `lines ${selection.startLine}–${selection.endLine}` : "file"} to chat (⌘⇧A / Ctrl+Shift+A)`} disabled={attaching || current.saving || savingAll || !!loading || !editor.current} onClick={() => void attachFile(current.path, editor.current?.getSelection())}><Icon name="plus" size={14} />{attaching ? "Attaching…" : "Attach to chat"}</button><button className="toolbar-button" aria-label="Vim key bindings" aria-pressed={vimEnabled} title={vimEnabled ? "Disable Vim key bindings" : "Enable Vim key bindings"} disabled={vimSettingsBusy} onClick={() => void toggleVim()}>Vim {vimEnabled ? "on" : "off"}</button><button className="toolbar-button" aria-label="Find in file" title="Find in file (⌘F / Ctrl+F)" onClick={() => editor.current?.find()}><Icon name="search" size={14} /></button><button className="toolbar-button" aria-label="Editor commands" title="Editor commands (⌘⇧P / Ctrl+Shift+P)" onClick={() => editor.current?.commandPalette()}><Icon name="settings" size={14} /></button></>}<button className="toolbar-button" aria-label="Reload file" title="Reload file from disk" disabled={current.kind === "binary" || current.saving || !!loading} onClick={() => void reloadFile(current.path)}><Icon name="reconnect" size={14} /></button>{current.kind === "text" && <button className="file-save" disabled={!isDirty(current) || current.saving} onClick={() => void saveFile(current.path)}><Icon name="save" size={14} />{current.saving ? "Saving…" : "Save file"}</button>}</div></div>
         {current.error && current.kind === "text" && <div className="file-conflict" role="alert"><Icon name="warning" size={15} /><span>{current.error} Your edits are still here.</span></div>}
-        <div className="file-code-surface" hidden={current.kind !== "text"}>{editorFile && <Suspense fallback={<div className="panel-empty"><span className="working-spinner" /><p>Opening editor…</p></div>}><CodeEditor ref={editor} onError={onError} path={editorFile.path} projectKey={projectKey} content={editorFile.content} vimEnabled={vimEnabled} readOnly={current.kind !== "text" || !!editorFile.saving || savingAll || loading === editorFile.path} openPaths={files.filter(file => file.kind === "text").map(file => file.path)} onChange={content => updateFiles(previous => previous.map(file => file.path === editorFile.path ? { ...file, content } : file))} onSave={() => void saveFile(editorFile.path)} onCursorChange={setCursor} onReady={editorReady} /></Suspense>}</div>
+        <div className="file-code-surface" hidden={current.kind !== "text"}>{editorFile && <Suspense fallback={<div className="panel-empty"><span className="working-spinner" /><p>Opening editor…</p></div>}><CodeEditor ref={editor} onError={onError} path={editorFile.path} projectKey={projectKey} content={editorFile.content} vimEnabled={vimEnabled} readOnly={current.kind !== "text" || !!editorFile.saving || savingAll || loading === editorFile.path} openPaths={files.filter(file => file.kind === "text").map(file => file.path)} onChange={content => updateFiles(previous => previous.map(file => file.path === editorFile.path ? { ...file, content } : file))} onSave={() => void saveFile(editorFile.path)} onCursorChange={setCursor} onSelectionChange={setSelection} onAttachSelection={range => void attachFile(editorFile.path, range)} onReady={editorReady} /></Suspense>}</div>
         {current.kind === "text" ? <footer className="file-editor-footer"><span>{isDirty(current) ? "Unsaved changes" : "Saved"}</span><span>Ln {cursor.line}, Col {cursor.column}<span className="file-footer-separator">·</span>UTF-8</span></footer> : current.kind === "image" ? <div className="file-image-preview"><img src={apiPath(`/api/files/raw?path=${encodeURIComponent(current.path)}&v=${current.revision}`)} alt={current.path} /></div> : <div className="panel-empty"><Icon name="file" size={28} /><h2>{fileName(current.path)}</h2><p>{current.error || "Download this file to open it in another app."}</p><a className="panel-primary" href={apiPath(`/api/files/raw?path=${encodeURIComponent(current.path)}`)} download={fileName(current.path)}><Icon name="download" size={15} />Download file</a></div>}
       </> : <div className="panel-empty"><Icon name="folder" size={30} /><h2>Your project files</h2><p>Open a file with ⌘P or Ctrl+P.<br />Search this project with ⌘⇧F or Ctrl+Shift+F.</p><button className="panel-primary" onClick={beginQuickOpen}><Icon name="search" size={14} />Quick Open</button></div>}
     </div>

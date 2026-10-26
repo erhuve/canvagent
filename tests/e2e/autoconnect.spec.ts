@@ -37,19 +37,19 @@ test('a workspace connects automatically once and reuses a ready runtime after r
   });
   try {
     await page.goto(path);
-    await expect(page.getByRole('button', { name: 'Connecting…', exact: true })).toBeVisible();
+    await expect(page.getByRole('status', { name: 'Connecting to Codex…', exact: true })).toBeVisible();
     await expect(page.getByText('Connecting to Codex with your existing login…', { exact: true })).toBeVisible();
     expect(requests).toBe(1);
     expectNoAutomaticTurns(await state(page, path));
     release();
-    await expect(page.getByRole('button', { name: 'Codex connected', exact: true })).toBeVisible();
+    await expect(page.getByRole('status', { name: 'Codex connected', exact: true })).toBeVisible();
     await expect.poll(() => frames).toBe(1);
     const connected = await state(page, path);
     expect(connected.runtime).toMatchObject({ connected: true, authenticated: true });
     expectNoAutomaticTurns(connected);
     await page.reload();
     await expect.poll(() => frames).toBe(2);
-    await expect(page.getByRole('button', { name: 'Codex connected', exact: true })).toBeVisible();
+    await expect(page.getByRole('status', { name: 'Codex connected', exact: true })).toBeVisible();
     expect(requests).toBe(1);
     expectNoAutomaticTurns(await state(page, path));
   } finally { release(); }
@@ -67,7 +67,7 @@ test('a failed automatic connection does not loop on service reconnect and can b
   });
   await page.goto(path);
   await expect(page.getByRole('status').filter({ hasText: 'Automatic connection test failure.' })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Connect Codex', exact: true })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Retry agent connection', exact: true })).toBeEnabled();
   expect(requests).toBe(1);
   await page.getByRole('textbox', { name: 'Message Codex' }).fill('Keep this draft while the connection recovers.');
   await sockets[0].close({ code: 1012, reason: 'Integration reconnect check' });
@@ -75,8 +75,8 @@ test('a failed automatic connection does not loop on service reconnect and can b
   await expect(page.locator('.offline-banner')).toHaveCount(0);
   expect(requests).toBe(1);
   expectNoAutomaticTurns(await state(page, path));
-  await page.getByRole('button', { name: 'Connect Codex', exact: true }).click();
-  await expect(page.getByRole('button', { name: 'Codex connected', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Retry agent connection', exact: true }).click();
+  await expect(page.getByRole('status', { name: 'Codex connected', exact: true })).toBeVisible();
   expect(requests).toBe(2);
   await expect(page.getByRole('textbox', { name: 'Message Codex' })).toHaveValue('Keep this draft while the connection recovers.');
   expectNoAutomaticTurns(await state(page, path));
@@ -108,8 +108,8 @@ test('an existing-login check that requires sign-in waits for manual retry and p
   await page.waitForTimeout(800);
   expect(requests).toBe(1);
   expectNoAutomaticTurns(await state(page, path));
-  await page.getByRole('button', { name: 'Connect Codex', exact: true }).click();
-  await expect(page.getByRole('button', { name: 'Codex connected', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Retry agent connection', exact: true }).click();
+  await expect(page.getByRole('status', { name: 'Codex connected', exact: true })).toBeVisible();
   expect(requests).toBe(2);
   await expect(input).toHaveValue('Keep this draft while I sign in.');
   expectNoAutomaticTurns(await state(page, path));

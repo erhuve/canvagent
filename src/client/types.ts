@@ -1,4 +1,6 @@
 import type { AgentModel, AgentSettings, SettingsRequirements } from '../shared/settings';
+import type { PublicAgentDefinition, AgentCapabilities } from '../shared/agents';
+import type { ContextAttachment, TurnReview } from '../shared/context';
 
 export type SceneElement = Record<string, any> & { id: string; isDeleted?: boolean };
 export type Board = {
@@ -10,6 +12,7 @@ export type Board = {
   lastAgentMutation?: string | null;
 };
 export type Message = {
+  attachments?: ContextAttachment[];
   id: string;
   role: string;
   text: string;
@@ -34,6 +37,8 @@ export type Approval = {
   [key: string]: any;
 };
 export type Session = {
+  reviews?: TurnReview[];
+  agentId?: string;
   settings?: AgentSettings;
   id: string;
   title: string;
@@ -46,6 +51,7 @@ export type Session = {
   error?: string;
 };
 export type Runtime = {
+  agentId?: string;
   connected: boolean;
   authenticated: boolean;
   version?: string;
@@ -55,9 +61,11 @@ export type Runtime = {
   defaults?: Partial<AgentSettings>;
   requirements?: SettingsRequirements;
   error?: string;
-  capabilities?: Record<string, boolean>;
+  capabilities?: AgentCapabilities;
 };
 export type AppState = {
+  agents: PublicAgentDefinition[];
+  defaultAgentId: string;
   board: Board;
   project: { workspace: string; name: string; desktop?: boolean };
   sessions: Session[];

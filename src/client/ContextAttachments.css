@@ -1,0 +1,52 @@
+.context-composer { position: relative; min-width: 0; }
+.context-composer-actions { display: flex; gap: 5px; margin: 1px -2px 7px; }
+.context-add-button { display: inline-flex; align-items: center; gap: 5px; padding: 4px 6px; color: #858590; font-size: 10px; border-radius: 5px; min-height: 26px; }
+.context-add-button:hover:not(:disabled), .context-add-button[aria-expanded=true] { background: #f2f2f6; color: #4b4b59; }
+.context-add-button kbd { margin-left: 4px; font-family: inherit; color: #b0b0bb; font-size: 10px; }
+.context-file-input { display: none; }
+.context-attachments { margin: 5px 0 10px; max-width: 100%; }
+.context-chips { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
+.context-chip { display: inline-flex; align-items: center; flex-wrap: wrap; min-width: 0; max-width: 100%; border: 1px solid #e2e2ea; border-radius: 7px; background: #f8f8fb; font-size: 10px; color: #5d5d6b; }
+.context-chip-preview { display: inline-flex; flex: 1; gap: 5px; align-items: center; min-width: 0; padding: 5px 7px; text-align: left; }
+.context-chip-preview:hover { color: #343446; background: #efeff5; border-radius: 7px; }
+.context-chip-preview > span:first-of-type, .context-pending-label > span:not(.working-spinner) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.context-chip-preview img { width: 27px; height: 25px; object-fit: cover; border-radius: 4px; flex-shrink: 0; }
+.context-chip-remove { display: flex; flex-shrink: 0; align-items: center; justify-content: center; width: 22px; min-height: 26px; padding: 4px; border-left: 1px solid #e8e8ef; color: #9a9aa6; }
+.context-chip-remove:hover { color: #4b4b59; }
+.context-pending-label { display: inline-flex; flex: 1; align-items: center; gap: 6px; padding: 5px 7px; min-width: 0; }
+.context-pending-label .working-spinner { width: 11px; height: 11px; flex-shrink: 0; }
+.context-pending-label small { white-space: nowrap; color: #a0a0ab; font-size: 9px; }
+.context-failed { border-color: #e8cbb8; background: #fff9f4; }
+.context-item-error { display: block; width: 100%; padding: 4px 7px; font-size: 10px; color: #a4714e; border-top: 1px solid #edddcf; }
+.context-error { display: flex; align-items: flex-start; gap: 6px; font-size: 11px; color: #a4714e; padding: 4px 0 8px; line-height: 1.5; }
+.context-error svg { margin-top: 2px; flex-shrink: 0; }
+.context-preview { min-width: 0; margin-top: 7px; border: 1px solid #e5e5ec; border-radius: 8px; padding: 10px; background: #fff; }
+.context-preview-heading { display: flex; align-items: center; gap: 6px; }
+.context-preview-heading strong { flex: 1; overflow-wrap: anywhere; font-size: 11px; font-weight: 550; }
+.context-preview-heading .icon-button { height: 22px; width: 22px; }
+.context-preview p { font-size: 9px; color: #9797a2; margin: 3px 0 9px; }
+.context-preview pre { white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; font-family: ui-monospace, monospace; font-size: 10px; line-height: 1.7; max-height: 230px; overflow: auto; margin: 0; color: #696976; }
+.context-image-preview { display: flex; flex-direction: column; gap: 5px; font-size: 9px; text-decoration: none; color: #9a9aa6; width: fit-content; max-width: 100%; }
+.context-image-preview img { max-width: 100%; max-height: 250px; object-fit: contain; border-radius: 4px; }
+.transcript-attachments { margin: 8px 0 0; }
+.transcript-attachments .context-chip-preview { max-width: 100%; }
+.transcript-attachments .context-kind-image .context-chip-preview img { width: 88px; height: 68px; }
+.context-picker { position: absolute; z-index: 40; bottom: calc(100% + 9px); left: -3px; right: -3px; max-height: min(440px, 55dvh); display: flex; flex-direction: column; background: #fff; border: 1px solid #dddde6; border-radius: 11px; box-shadow: 0 12px 50px #22223620, 0 2px 5px #22223608; overflow: hidden; }
+.context-picker-heading { display: flex; gap: 6px; align-items: center; padding: 7px 8px 7px 13px; font-size: 11px; color: #6c6c7a; }
+.context-picker-heading > span:first-child { font-weight: 550; }
+.context-picker-heading > span:nth-child(2) { color: #aaaab5; font-size: 9px; margin-left: auto; }
+.context-picker-heading .icon-button { width: 22px; height: 22px; }
+.context-search { display: flex; align-items: center; gap: 7px; border-bottom: 1px solid #eeeef4; margin: 0 11px 5px; color: #a1a1ae; padding: 3px 0 10px; }
+.context-search input { border: 0; outline: none; min-width: 0; width: 100%; font-size: 12px; color: #4a4a58; }
+.context-search input::placeholder { color: #b0b0bc; }
+.context-suggestions { overflow: auto; padding: 0 5px 5px; scrollbar-width: thin; }
+.context-suggestions > button { display: flex; gap: 9px; width: 100%; align-items: center; text-align: left; padding: 9px 8px; border-radius: 6px; color: #80808f; }
+.context-suggestions > button[aria-selected=true] { background: #f0f0f6; color: #4b4b60; }
+.context-suggestions > button > span:first-of-type { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.context-suggestions strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; font-weight: 500; }
+.context-suggestions small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 9px; color: #a0a0ad; }
+.context-suggestion-kind { font-size: 9px; color: #a8a8b5; text-transform: capitalize; }
+.context-empty { padding: 18px 10px; font-size: 11px; line-height: 1.6; color: #9c9ca9; }
+.context-picker-footer { display: flex; justify-content: space-between; gap: 6px; border-top: 1px solid #eeeef4; padding: 8px 12px; font-size: 9px; color: #aaaab5; }
+.context-drop-overlay { position: absolute; inset: -5px; border-radius: 10px; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 8px; border: 1px dashed #9393af; background: #f5f5fcee; color: #77778f; font-size: 12px; pointer-events: none; }
+@media (max-width: 520px) { .context-picker-heading > span:nth-child(2) { display: none; } .context-add-button { min-height: 30px; } .context-chip-remove { min-width: 28px; min-height: 30px; } .context-picker { max-height: 42dvh; } }

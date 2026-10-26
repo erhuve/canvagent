@@ -7,7 +7,18 @@ import { resolve, join } from 'node:path';
 import { WebSocket, WebSocketServer } from 'ws';
 import { z } from 'zod';
 import { Store, type MutationResult } from './store.js';
-import { CodexRuntime, type RuntimeEvent } from './runtime.js';
+import { CodexRuntime, type RuntimeEvent, type RuntimeOptions } from './runtime.js';
+import type { AgentRuntime, AgentRuntimeConnection } from './agent-runtime.js';
+import { AcpRuntime } from './acp-runtime.js';
+import { ApiRuntime } from './api-runtime.js';
+import { AgentRegistry } from './agents.js';
+import { builtinAgents, capabilitiesForAgent, type AgentCapabilities } from '../shared/agents.js';
+import { AgentWorkspaceTools, workspaceToolSpecs } from './agent-workspace-tools.js';
+import { createGitRouter } from './git.js';
+import { ContextAttachments } from './context-attachments.js';
+import { WorkspaceFiles } from './workspace-files.js';
+import { TurnReviews, type ReviewSnapshot } from './turn-review.js';
+import type { ContextReference, ContextSuggestion, TurnReview } from '../shared/context.js';
 import { ArtifactFiles } from './artifacts.js';
 import { CanvasTools, canvasToolSpecs, type Region } from './canvas-tools.js';
 import type { Session, RuntimeState, Artifact, Approval } from '../shared/types.js';
@@ -22,7 +33,15 @@ const instructions = `You are the agent in Canvagent, a normal local coding harn
 const now = () => new Date().toISOString();
 const requestId = z.string().min(1).max(160);
 const selectionSchema = z.object({ elementIds: z.array(z.string()).max(200), region: z.any().optional() });
-const messageSchema = z.object({ requestId, text: z.string().trim().min(1).max(50000), selection: selectionSchema.default({ elementIds: [] }) });
+const messageSchema = z.object({ requestId, text: z.string().trim().max(50000), attachments: z.array(z.string().min(1).max(100)).max(12).default([]), selection: selectionSchema.default({ elementIds: [] }) }).refine(input => input.text.length > 0 || input.attachments.length > 0, { message: 'Add a message or attachment.' });
+const contextReferenceSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('file'), path: z.string().min(1).max(4096), startLine: z.number().int().positive().optional(), endLine: z.number().int().positive().optional() }).strict(),
+  z.object({ kind: z.literal('folder'), path: z.string().max(4096) }).strict(),
+  z.object({ kind: z.literal('conversation'), sessionId: requestId }).strict(),
+  z.object({ kind: z.literal('canvas'), elementIds: z.array(z.string().min(1).max(200)).min(1).max(200) }).strict(),
+  z.object({ kind: z.literal('artifact'), artifactId: requestId }).strict(),
+  z.object({ kind: z.literal('image'), imageId: requestId }).strict(),
+]);
 const layoutSettingsSchema = z.object({
   sidebarWidth: z.number().finite().min(180).max(420),
   chatRatio: z.number().finite().min(0.1).max(0.9),
@@ -30,7 +49,13 @@ const layoutSettingsSchema = z.object({
 const defaultLayoutSettings = { sidebarWidth: 240, chatRatio: 0.85 / 2.35 };
 
 type SessionExecution = {
-  runtime?: CodexRuntime;
+  runtime?: AgentRuntime;
+  connection?: AgentRuntimeConnection;
+  capabilities?: AgentCapabilities;
+  error?: string;
+  reviewBefore?: ReviewSnapshot;
+  reviewId?: string;
+  reviewFinishing?: Promise<void>;
   settingsKey?: string;
   canvasToken?: string;
   connecting?: Promise<void>;
@@ -52,7 +77,7 @@ export interface ApplicationOptions {
   workspace: string;
   dataDir: string;
   port?: number;
-  runtimeFactory?: (options: ConstructorParameters<typeof CodexRuntime>[0]) => CodexRuntime;
+  runtimeFactory?: (options: RuntimeOptions) => AgentRuntime;
   distDir?: string;
   assetsDir?: string;
   runtimeCommand?: string;
@@ -70,12 +95,15 @@ export function createApplication(options: ApplicationOptions) {
   const projectName = workspace.split('/').filter(Boolean).at(-1) ?? 'Project';
   const store = new Store(options.dataDir);
   try {
+  const agents = new AgentRegistry(store);
+  let defaultAgentId = store.get<string>('defaultAgentId') ?? 'codex';
   const storedWorkspace = store.get<string>('workspaceRoot');
   if (storedWorkspace && storedWorkspace !== workspace) {
     throw new Error('This data directory belongs to another workspace. Choose a different --data-dir.');
   }
   store.set('workspaceRoot', workspace);
   const artifactFiles = new ArtifactFiles(workspace, join(options.dataDir, 'artifacts'));
+  const workspaceTools = new AgentWorkspaceTools(workspace);
   const app = express();
   const server = createServer(app);
   const sockets = new Set<WebSocket>();
@@ -96,9 +124,14 @@ export function createApplication(options: ApplicationOptions) {
   };
   runtimeState.model = runtimeState.settings.model;
   const captures = new Map<string, { revision: number; resolve: (value: any) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
+  const contextAttachments = new ContextAttachments({ workspace, dataDir: options.dataDir, store, board: () => store.board(), sessions: () => sessions, artifacts: () => store.get<Artifact[]>('artifacts') ?? [] });
+  const contextFiles = new WorkspaceFiles(workspace);
+  const turnReviews = new TurnReviews({ workspace, dataDir: options.dataDir, store, board: () => store.board() });
   let lastBroadcastRevision = store.board().revision;
 
   for (const session of sessions) {
+    for (const review of session.reviews ?? []) if (review.status === 'running') review.status = 'unknown';
+    session.agentId ??= 'codex';
     session.settings = agentSettingsSchema.parse({ ...runtimeState.settings, ...session.settings });
     session.activities ??= [];
     session.queued ??= [];
@@ -147,11 +180,17 @@ export function createApplication(options: ApplicationOptions) {
       ? { ...element, link: `${basePath}${element.link}` } : element);
     return { ...board, lastAgentMutation: store.get<string>('lastAgentMutation') ?? null };
   }
-  function runtimeChanged() { emit({ type: 'runtime', runtime: runtimeState }); }
-  function connectionChanged(error?: string) {
-    runtimeState.connected = [...executions.values()].some(run => run.connected);
-    runtimeState.authenticated = [...executions.values()].some(run => run.connected && run.authenticated);
-    runtimeState.error = runtimeState.authenticated ? undefined : error;
+  function runtimeForSession(session = sessions.find(item => item.id === activeSessionId)): RuntimeState {
+    const run = session ? executions.get(session.id) : undefined;
+    const agent = agents.get(session?.agentId ?? defaultAgentId);
+    return { ...runtimeState, agentId: agent.id, version: run?.connection?.version ?? 'not connected',
+      models: run?.connection?.models ?? [], defaults: run?.connection?.defaults, requirements: run?.connection?.requirements,
+      connected: run?.connected ?? false, authenticated: run?.authenticated ?? false, error: run?.error,
+      capabilities: run?.capabilities ?? capabilitiesForAgent(agent) };
+  }
+  function runtimeChanged() { emit({ type: 'runtime', runtime: runtimeForSession() }); }
+  function connectionChanged(run: SessionExecution, error?: string) {
+    run.error = run.authenticated ? undefined : error;
     runtimeChanged();
   }
   function execution(session: Session) {
@@ -172,8 +211,10 @@ export function createApplication(options: ApplicationOptions) {
     if (!session) throw Object.assign(new Error('Session not found.'), { status: 404 });
     return session;
   }
-  function newSession(title = 'New session') {
-    const session: Session = { id: randomUUID(), title, settings: structuredClone(runtimeState.settings), threadId: null, turnId: null, status: 'idle', messages: [], activities: [], pendingApprovals: [], queued: [], contextRevision: 0, createdAt: now() };
+  function newSession(title = 'New session', agentId = defaultAgentId) {
+    const agent = agents.get(agentId);
+    const settings = agent.kind === 'codex' ? structuredClone(runtimeState.settings) : agentSettingsSchema.parse({ model: agent.model ?? '' });
+    const session: Session = { id: randomUUID(), agentId, title, settings, threadId: null, turnId: null, status: 'idle', messages: [], activities: [], pendingApprovals: [], queued: [], contextRevision: 0, createdAt: now() };
     sessions.push(session); activeSessionId = session.id; persist();
     return session;
   }
@@ -181,7 +222,7 @@ export function createApplication(options: ApplicationOptions) {
   else persist(); // Persist one-time settings migration before defaults can change.
   function state() { return {
     project: { name: workspace.split('/').filter(Boolean).at(-1) ?? 'Project', workspace, ...(options.desktop ? { desktop: true } : {}) },
-    board: boardSnapshot(), sessions, activeSessionId, runtime: runtimeState,
+    board: boardSnapshot(), sessions, activeSessionId, runtime: runtimeForSession(), agents: agents.list(), defaultAgentId,
     artifacts: store.get<Artifact[]>('artifacts') ?? [],
   }; }
   function summary() { return {
@@ -195,16 +236,29 @@ export function createApplication(options: ApplicationOptions) {
     session.activities = session.activities.slice(-100);
   }
   function systemMessage(session: Session, text: string) { session.messages.push({ id: randomUUID(), role: 'system', text, createdAt: now() }); }
-  function validateSettings(settings: AgentSettings) {
-    const effective = { ...settings, model: settings.model || runtimeState.defaults?.model || '' };
-    const error = settingsCompatibilityError(effective, runtimeState.models, runtimeState.requirements);
+  function finishReview(session: Session, run: SessionExecution, status: TurnReview['status']) {
+    const before = run.reviewBefore, review = session.reviews?.find(item => item.id === run.reviewId);
+    run.reviewBefore = undefined; run.reviewId = undefined;
+    if (!before || !review) return Promise.resolve();
+    review.status = status;
+    const finishing = turnReviews.finish(before, review).then(result => {
+      session.reviews = session.reviews?.map(item => item.id === result.id ? result : item);
+      if (!closed) sessionChanged(session);
+    }).catch(() => { review.truncated = true; review.completedAt = now(); if (!closed) sessionChanged(session); }).finally(() => { if (run.reviewFinishing === finishing) run.reviewFinishing = undefined; });
+    run.reviewFinishing = finishing;
+    return finishing;
+  }
+  function validateSettings(settings: AgentSettings, session?: Session) {
+    const runtime = runtimeForSession(session);
+    const effective = { ...settings, model: settings.model || runtime.defaults?.model || '' };
+    const error = settingsCompatibilityError(effective, runtime.models, runtime.requirements);
     if (error) throw Object.assign(new Error(error), { status: 400 });
     if (JSON.stringify(settings.configOverrides).length > 64000) throw Object.assign(new Error('Additional Codex configuration is too large.'), { status: 400 });
     return settings;
   }
-  function updateSettings(current: AgentSettings, input: unknown) {
+  function updateSettings(current: AgentSettings, input: unknown, session?: Session) {
     const patch = z.record(z.string(), z.unknown()).parse(input);
-    return validateSettings(agentSettingsSchema.parse({ ...current, ...patch }));
+    return validateSettings(agentSettingsSchema.parse({ ...current, ...patch }), session);
   }
 
   function boardChanged(result: MutationResult, actor: string) {
@@ -216,7 +270,7 @@ export function createApplication(options: ApplicationOptions) {
     emit({ type: 'board', board, mutation: { id: result.mutationId, actor } });
     if (!['human', 'undo'].includes(actor)) return;
     for (const [sessionId, run] of executions) {
-      if (!run.busy) continue;
+      if (!run.busy || !run.capabilities?.steering) continue;
       run.pendingNotice ??= { sinceRevision: Math.max(0, board.revision - 1), throughRevision: board.revision, ids: new Set(), deleted: new Set() };
       run.pendingNotice.throughRevision = board.revision;
       for (const e of result.changedElements) {
@@ -245,7 +299,7 @@ export function createApplication(options: ApplicationOptions) {
       await runtime.steer(`[Canvagent resource update, not a new user task]\n${JSON.stringify(notice)}`, expectedTurnId);
       if (closed || run.runtime !== runtime || runtime.activeTurnId !== expectedTurnId) return;
       recordActivity(session, randomUUID(), 'canvas', `Canvas revision ${summary.throughRevision} shared with agent`, 'completed');
-      runtimeState.capabilities.canvasChangeNotices = true; runtimeChanged(); sessionChanged(session);
+      run.capabilities!.canvasChangeNotices = true; runtimeChanged(); sessionChanged(session);
     } catch (error) {
       if (closed || run.runtime !== runtime || runtime.activeTurnId !== expectedTurnId) return;
       // Human edits may have populated this closure while steering awaited RPC.
@@ -255,7 +309,7 @@ export function createApplication(options: ApplicationOptions) {
       run.pendingNotice = { sinceRevision: summary.sinceRevision, throughRevision: current.revision,
         ids: combinedIds, deleted: new Set(current.elements.filter(e => e.isDeleted && combinedIds.has(e.id)).map(e => e.id)) };
       run.noticeDeliveryBlocked = true;
-      runtimeState.capabilities.canvasChangeNotices = false; runtimeChanged();
+      run.capabilities!.canvasChangeNotices = false; runtimeChanged();
       recordActivity(session, randomUUID(), 'canvas', 'Live canvas notice unavailable; latest state remains readable', 'failed', String(error));
       sessionChanged(session);
       // Do not blindly retry an uncertain steering submission. New edits and the
@@ -292,16 +346,19 @@ export function createApplication(options: ApplicationOptions) {
       if (p.state === 'disconnected') {
         run.authenticated = false;
         if (run.busy) {
-          if (!p.intentional) notifyTurnFailure(session, run, p.reason ?? p.message ?? 'Codex disconnected before this turn finished.');
+          if (!p.intentional) notifyTurnFailure(session, run, p.reason ?? p.message ?? 'The agent disconnected before this turn finished.');
           session.status = 'unknown'; session.pendingApprovals = [];
-          systemMessage(session, 'Codex disconnected. The saved conversation and board are retained.');
+          void finishReview(session, run, 'unknown');
+          systemMessage(session, 'The agent disconnected. The saved conversation and board are retained.');
           run.busy = false; clearNotices(run); sessionChanged(session);
         }
       }
-      connectionChanged(p.state === 'disconnected' && !p.intentional ? p.reason ?? p.message ?? 'Codex disconnected.' : runtimeState.error); return;
+      connectionChanged(run, p.state === 'disconnected' && !p.intentional ? p.reason ?? p.message ?? 'The agent disconnected.' : run.error); return;
     }
     if (p.threadId && run.runtime?.threadId && p.threadId !== run.runtime.threadId) return;
     if (event.type === 'canvas_tools.ready') {
+      if (run.capabilities) run.capabilities.canvasTools = true;
+      runtimeChanged();
       recordActivity(session, 'canvas-tools-ready', 'canvas', 'Canvas tools ready', 'completed');
     } else if (event.type === 'item/agentMessage/delta') {
       const id = String(p.itemId ?? p.turnId ?? 'assistant');
@@ -314,6 +371,8 @@ export function createApplication(options: ApplicationOptions) {
       run.busy = true;
       run.notificationRunId = `turn:${turnId}`;
       session.turnId = turnId; session.status = 'running';
+      const review = session.reviews?.find(item => item.id === run.reviewId);
+      if (review) review.turnId = turnId;
     } else if (event.type === 'item/started' || event.type === 'item/completed') {
       const item = p.item ?? {};
       if (item.type === 'agentMessage' && item.text) {
@@ -347,12 +406,14 @@ export function createApplication(options: ApplicationOptions) {
       run.busy = false;
       clearNotices(run);
       sessionChanged(session);
-      if (session.queued.length) { const queued = session.queued.shift()!; persist(); queueMicrotask(() => void dispatch(session, queued.text, queued.selection, queued.id).catch(error => failTurn(session, error))); }
+      void finishReview(session, run, turnStatus === 'failed' ? 'failed' : turnStatus === 'interrupted' || run.interruptedTurnId === turnId ? 'interrupted' : 'completed').then(() => {
+        drainQueued(session, run);
+      });
       return;
     } else if (event.type === 'error' || event.type === 'runtime.error') {
       const text = p.error?.message ?? p.message ?? 'Runtime error';
-      if (p.error?.codexErrorInfo === 'unauthorized') {
-        run.authenticated = false; connectionChanged(text);
+      if (p.error?.codexErrorInfo === 'unauthorized' || p.authenticationRequired === true) {
+        run.authenticated = false; connectionChanged(run, text);
       }
       recordActivity(session, randomUUID(), 'runtime', text, 'failed');
     } else return;
@@ -361,7 +422,8 @@ export function createApplication(options: ApplicationOptions) {
   async function connectRuntime(session: Session) {
     if (closed) throw new Error('Application closed.');
     const run = execution(session);
-    const settingsKey = JSON.stringify(session.settings ?? runtimeState.settings);
+    const agent = agents.get(session.agentId ?? 'codex');
+    const settingsKey = JSON.stringify({ agent, settings: session.settings ?? runtimeState.settings });
     if (run.connected && run.authenticated && run.runtime && (run.settingsKey === settingsKey || run.runtime.activeTurnId)) return;
     if (run.connecting) return run.connecting;
     const previous = run.runtime; run.runtime = undefined; previous?.close();
@@ -370,18 +432,29 @@ export function createApplication(options: ApplicationOptions) {
     // Reconnect only this idle conversation when its next-turn settings changed.
     run.settingsKey = settingsKey; run.connected = false; run.authenticated = false;
     run.canvasToken = randomBytes(32).toString('hex');
-    const runtime = (options.runtimeFactory ?? (configuration => new CodexRuntime(configuration)))({
-      cwd: workspace, settings: () => session.settings ?? runtimeState.settings, tools: canvasToolSpecs, developerInstructions: instructions,
+    const environment: Record<string, string> = {};
+    if (agent.kind === 'codex') for (const [target, source] of Object.entries(agent.env ?? {})) {
+      if (process.env[source] === undefined) throw new Error(`Required environment variable ${source} is not set.`);
+      environment[target] = process.env[source]!;
+    }
+    const configuration: RuntimeOptions = {
+      cwd: workspace, settings: () => session.settings ?? runtimeState.settings,
+      tools: ['anthropic', 'openai-compatible'].includes(agent.kind) ? [...canvasToolSpecs, ...workspaceToolSpecs] : canvasToolSpecs,
+      developerInstructions: instructions,
       canvasMcp: { token: run.canvasToken, url: () => {
         const address = server.address();
         const port = options.publicPort?.() ?? (address && typeof address === 'object' ? address.port : undefined);
         if (!port) throw new Error('A running workspace is required for canvas tools.');
         return `http://127.0.0.1:${port}${basePath}/mcp/${encodeURIComponent(session.id)}`;
       } },
-      ...(options.runtimeCommand ? { command: options.runtimeCommand } : {}),
+      ...(agent.kind === 'codex' ? { command: agents.overridden(agent.id) && agent.command ? agent.command : options.runtimeCommand ?? agent.command, args: agent.args, env: environment } : {}),
       onEvent: event => { if (!closed && run.runtime === runtime) onRuntimeEvent(session, run, event); },
-      onTool: (name, args) => {
+      onTool: (name, args, signal) => {
         const turnId = runtime.activeTurnId;
+        if (name.startsWith('workspace_') && ['anthropic', 'openai-compatible'].includes(agent.kind)) {
+          if (closed || run.runtime !== runtime || !run.busy || !turnId) return Promise.resolve({ success: false, contentItems: [{ type: 'inputText', text: 'This turn is no longer active.' }] });
+          return workspaceTools.call(name, args, signal);
+        }
         return callCanvasTool(name, args, { sessionId: session.id,
           isCurrent: () => !closed && run.runtime === runtime && run.busy && !!turnId && runtime.activeTurnId === turnId });
       },
@@ -401,20 +474,24 @@ export function createApplication(options: ApplicationOptions) {
         session.pendingApprovals.push(approval); session.status = 'awaiting_approval'; sessionChanged(session);
         notify(session, 'approval', approval.title, approval.description, `approval:${run.notificationRunId}:${request.method}:${request.id}`);
       },
-    });
+    };
+    const runtime: AgentRuntime = options.runtimeFactory ? options.runtimeFactory(configuration)
+      : agent.kind === 'codex' ? new CodexRuntime(configuration)
+      : agent.kind === 'acp' ? new AcpRuntime({ ...configuration, agent })
+      : new ApiRuntime({ ...configuration, agent, apiKey: agents.key(agent.id), history: session.messages.map(message => ({ ...message, text: [message.text, message.contextText].filter(Boolean).join('\n\n'), images: contextAttachments.images(message.attachments ?? []) })) });
     run.runtime = runtime;
     run.connecting = (async () => {
       try {
         const result = await runtime.connect();
-        if (closed || run.runtime !== runtime) throw new Error('Codex connection closed.');
+        if (closed || run.runtime !== runtime) throw new Error('Agent connection closed.');
         run.connected = true; run.authenticated = result.authenticated;
-        Object.assign(runtimeState, { version: result.version, models: result.models, defaults: result.defaults, requirements: result.requirements });
-        runtimeState.capabilities.steering = true;
-        connectionChanged();
+        run.connection = result;
+        run.capabilities = { ...capabilitiesForAgent(agent), ...result.capabilities };
+        connectionChanged(run);
       } catch (error) {
         if (!closed && run.runtime === runtime) {
           run.connected = false; run.authenticated = false;
-          connectionChanged(error instanceof Error ? error.message : String(error));
+          connectionChanged(run, error instanceof Error ? error.message : String(error));
         }
         throw error;
       } finally { run.connecting = undefined; }
@@ -425,6 +502,7 @@ export function createApplication(options: ApplicationOptions) {
     if (closed) return;
     session.status = error?.uncertain ? 'unknown' : 'failed';
     const run = execution(session); run.busy = false; clearNotices(run);
+    void finishReview(session, run, error?.uncertain ? 'unknown' : 'failed');
     const detail = error?.message ?? String(error);
     notifyTurnFailure(session, run, detail);
     systemMessage(session, /no rollout found/i.test(detail)
@@ -442,21 +520,27 @@ export function createApplication(options: ApplicationOptions) {
       overview, totalObjects: live.length, truncated: live.length > 80,
       instruction: 'Current committed resource state at dispatch. Inspect with read_canvas/capture_region for detail; use service revisions for edits.' };
   }
+  function drainQueued(session: Session, run: SessionExecution) {
+    if (closed || run.busy || run.dispatchPending || run.reviewFinishing || !session.queued.length) return;
+    const queued = session.queued.shift()!; persist();
+    void dispatch(session, queued.text, queued.selection, queued.id).catch(error => failTurn(session, error));
+  }
   function dispatch(session: Session, text: string, selection: { elementIds: string[] }, id: string): Promise<void> {
     const run = execution(session);
     run.dispatchPending++;
-    const dispatched = run.dispatchTail.then(() => beginDispatch(session, text, selection, id)).finally(() => { run.dispatchPending--; });
+    const dispatched = run.dispatchTail.then(() => beginDispatch(session, text, selection, id)).finally(() => { run.dispatchPending--; drainQueued(session, run); });
     run.dispatchTail = dispatched.catch(() => {});
     return dispatched;
   }
   async function beginDispatch(session: Session, text: string, selection: { elementIds: string[] }, id: string) {
     if (closed) throw new Error('Application closed.');
     const run = execution(session);
+    await run.reviewFinishing;
     if (run.busy) throw Object.assign(new Error('This conversation already has an active turn.'), { status: 409 });
     run.notificationRunId = id; run.interruptedTurnId = undefined;
     run.busy = true; session.status = 'starting'; sessionChanged(session);
     await connectRuntime(session);
-    validateSettings(session.settings ?? runtimeState.settings);
+    validateSettings(session.settings ?? runtimeState.settings, session);
     const runtime = run.runtime!;
     const thread = await runtime.open(session.threadId ?? undefined);
     if (closed) return;
@@ -470,7 +554,13 @@ export function createApplication(options: ApplicationOptions) {
     }
     const canvasContext = context(session, selection);
     run.noticeDeliveryBlocked = false;
-    const nativeTurnId = await runtime.start(`${text}\n\n[Canvagent canvas resource context]\n${JSON.stringify(canvasContext)}`, id);
+    const review: TurnReview = { id: randomUUID(), messageId: id, createdAt: now(), status: 'running', files: [], canvasElementIds: [] };
+    try { run.reviewBefore = await turnReviews.capture(); run.reviewId = review.id; }
+    catch { run.reviewBefore = undefined; run.reviewId = undefined; review.status = 'unknown'; review.truncated = true; review.completedAt = now(); }
+    if (closed) return;
+    session.reviews = [...(session.reviews ?? []).slice(-19), review]; sessionChanged(session);
+    const message = session.messages.find(item => item.id === id);
+    const nativeTurnId = await runtime.start(`${text}${message?.contextText ? `\n\n${message.contextText}` : ''}\n\n[Canvagent canvas resource context]\n${JSON.stringify(canvasContext)}`, id, contextAttachments.images(message?.attachments ?? []));
     if (closed) return;
     session.contextRevision = canvasContext.revision;
     if (run.busy && runtime.activeTurnId === nativeTurnId) {
@@ -506,6 +596,36 @@ export function createApplication(options: ApplicationOptions) {
   });
   app.use(express.json({ limit: '30mb' }));
   app.use('/api/files', createWorkspaceFileRouter(workspace));
+  app.post('/api/context/attachments', async (req, res) => {
+    const { reference } = z.object({ reference: contextReferenceSchema }).strict().parse(req.body);
+    res.json(await contextAttachments.add(reference));
+  });
+  app.get('/api/context/attachments', (req, res) => {
+    const ids = z.string().max(2000).default('').parse(req.query.ids).split(',').filter(Boolean);
+    res.json({ attachments: contextAttachments.get(ids) });
+  });
+  app.post('/api/context/images', async (req, res) => {
+    const input = z.object({ name: z.string().min(1).max(255), dataUrl: z.string().max(15 * 1024 * 1024) }).strict().parse(req.body);
+    res.json(await contextAttachments.uploadImage(input));
+  });
+  app.get('/api/context/images/:id', (req, res) => {
+    const image = contextAttachments.image(req.params.id);
+    res.set({ 'Content-Type': image.mimeType, 'Cache-Control': 'private, max-age=31536000, immutable', 'Content-Security-Policy': "sandbox; default-src 'none'" });
+    res.send(image.bytes);
+  });
+  app.get('/api/context/suggestions', async (req, res) => {
+    const query = z.string().max(1000).default('').parse(req.query.query).trim();
+    const matches = (text: string) => !query || text.toLowerCase().includes(query.toLowerCase());
+    const indexed = await contextFiles.index(query);
+    const items: ContextSuggestion[] = indexed.files.slice(0, 24).map(file => ({ label: file.path, description: 'Project file', reference: { kind: 'file', path: file.path } }));
+    const folders = [...new Set(indexed.files.flatMap(file => file.path.includes('/') ? [file.path.slice(0, file.path.lastIndexOf('/'))] : []))];
+    for (const path of folders.filter(matches).slice(0, 6)) items.push({ label: `${path}/`, description: 'Folder listing', reference: { kind: 'folder', path } });
+    for (const session of [...sessions].reverse().filter(session => session.messages.length && matches(session.title)).slice(0, 8)) items.push({ label: session.title, description: 'Conversation', reference: { kind: 'conversation', sessionId: session.id } });
+    const board = store.board();
+    for (const element of board.elements.filter(element => !element.isDeleted && matches(`${element.text ?? ''} ${element.type} ${element.id}`)).slice(0, 10)) items.push({ label: String(element.text ?? element.type).slice(0, 100), description: 'Canvas object', reference: { kind: 'canvas', elementIds: [element.id] } });
+    for (const artifact of (store.get<Artifact[]>('artifacts') ?? []).filter(artifact => matches(`${artifact.title} ${artifact.fileName}`)).slice(0, 6)) items.push({ label: artifact.title || artifact.fileName, description: 'Published artifact', reference: { kind: 'artifact', artifactId: artifact.id } });
+    res.json({ items: items.slice(0, 50), truncated: indexed.truncated });
+  });
   app.use('/api/terminals', terminals.router);
   const editorSettings = () => ({ vimEnabled: store.get<{ vimEnabled?: boolean }>('editorSettings')?.vimEnabled !== false });
   app.get('/api/editor/settings', (_req, res) => res.json(editorSettings()));
@@ -539,6 +659,7 @@ export function createApplication(options: ApplicationOptions) {
       return callCanvasTool(name, args, { sessionId: session.id, isCurrent });
     });
   });
+  app.use('/api/git', createGitRouter(workspace));
   app.get('/api/state', (_req, res) => res.json(state()));
   app.get('/api/notifications', (_req, res) => res.json({ notifications: notifications() }));
   app.post('/api/notifications/read', (req, res) => {
@@ -551,23 +672,121 @@ export function createApplication(options: ApplicationOptions) {
     store.set('notificationSettings', notificationSettings);
     res.json(notificationSettings);
   });
-  app.post('/api/runtime/connect', async (_req, res) => { await connectRuntime(findSession(activeSessionId)); res.json(runtimeState); });
+  app.post('/api/runtime/connect', async (req, res) => {
+    const { sessionId } = z.object({ sessionId: requestId.optional() }).parse(req.body);
+    const session = findSession(sessionId ?? activeSessionId);
+    await connectRuntime(session); res.json(runtimeForSession(session));
+  });
+  app.get('/api/agents', (_req, res) => res.json({ agents: agents.list(), defaultAgentId }));
+  function invalidateAgent(id: string) {
+    for (const session of sessions.filter(item => item.agentId === id)) {
+      const run = executions.get(session.id);
+      if (!run) continue;
+      const runtime = run.runtime;
+      run.runtime = undefined;
+      executions.delete(session.id);
+      runtime?.close();
+    }
+  }
+  function requireIdleAgent(id: string) {
+    if (sessions.some(session => session.agentId === id && (executions.get(session.id)?.busy || executions.get(session.id)?.connecting || executions.get(session.id)?.dispatchPending)))
+      throw Object.assign(new Error('Wait for this agent’s active work or connection to finish before changing its configuration.'), { status: 409 });
+  }
+  app.post('/api/agents', (req, res) => {
+    const id = typeof req.body?.id === 'string' ? req.body.id : undefined;
+    const previous = id ? agents.list().find(agent => agent.id === id) : undefined;
+    if (id) {
+      requireIdleAgent(id);
+      if (sessions.some(session => session.agentId === id && session.threadId) && agents.get(id).kind !== req.body.kind)
+        return res.status(409).json({ error: 'Use a new agent configuration when changing the provider of saved conversations.' });
+    }
+    const agent = agents.save(req.body);
+    invalidateAgent(agent.id);
+    if (['anthropic', 'openai-compatible'].includes(agent.kind) && previous?.model !== agent.model) {
+      for (const session of sessions.filter(session => session.agentId === agent.id)) {
+        if (!session.settings?.model || session.settings.model === previous?.model) session.settings = agentSettingsSchema.parse({ ...session.settings, model: agent.model });
+      }
+      persist();
+    }
+    emit({ type: 'state', state: state() }); res.json(agent);
+  });
+  app.post('/api/agents/:id/remove', (req, res) => {
+    const id = req.params.id;
+    requireIdleAgent(id);
+    const builtin = agents.list().find(agent => agent.id === id)?.builtin;
+    if (builtin && sessions.some(session => session.agentId === id && (session.threadId || session.messages.length))) {
+      const current = agents.get(id), original = builtinAgents.find(agent => agent.id === id)!;
+      if (current.kind !== original.kind || current.command !== original.command || JSON.stringify(current.args ?? []) !== JSON.stringify(original.args ?? []) || current.baseUrl !== original.baseUrl)
+        return res.status(409).json({ error: 'This configuration owns saved conversations. Keep its connection settings so their original agent can resume.' });
+    }
+    if (!builtin && sessions.some(session => session.agentId === id && (session.threadId || session.messages.length)))
+      return res.status(409).json({ error: 'This agent owns saved conversations. Keep its configuration so those conversations can resume.' });
+    agents.remove(id); invalidateAgent(id);
+    if (!builtin) {
+      for (const session of sessions.filter(item => item.agentId === id)) { session.agentId = 'codex'; session.settings = structuredClone(runtimeState.settings); }
+      if (defaultAgentId === id) { defaultAgentId = 'codex'; store.set('defaultAgentId', defaultAgentId); }
+      persist();
+    }
+    emit({ type: 'state', state: state() }); res.json({ ok: true });
+  });
   app.post('/api/settings', (req, res) => {
     const settings = updateSettings(runtimeState.settings, req.body);
     runtimeState.settings = settings; runtimeState.model = settings.model;
     store.set('settings', settings); store.set('model', settings.model);
-    runtimeChanged(); res.json(runtimeState);
+    runtimeChanged(); res.json(runtimeForSession());
   });
   app.post('/api/sessions', (req, res) => {
-    const { title } = z.object({ title: z.string().max(100).optional() }).parse(req.body);
-    const session = newSession(title); emit({ type: 'state', state: state() }); res.json(session);
+    const { title, agentId } = z.object({ title: z.string().max(100).optional(), agentId: requestId.optional() }).parse(req.body);
+    const session = newSession(title, agentId); emit({ type: 'state', state: state() }); res.json(session);
   });
   app.post('/api/sessions/:id/activate', (req, res) => { findSession(req.params.id); activeSessionId = req.params.id; persist(); emit({ type: 'state', state: state() }); res.json({ ok: true }); });
+  app.get('/api/sessions/:id/reviews/:reviewId', async (req, res) => {
+    const session = findSession(req.params.id);
+    const review = session.reviews?.find(review => review.id === req.params.reviewId);
+    if (!review) return res.status(404).json({ error: 'Turn review not found in this conversation.' });
+    if (req.query.path === undefined) return res.json({ review });
+    const path = z.string().min(1).max(4096).parse(req.query.path);
+    res.json({ review, ...await turnReviews.diff(review, path) });
+  });
+  app.post('/api/sessions/:id/reviews/:reviewId/restore', async (req, res) => {
+    const session = findSession(req.params.id);
+    const review = session.reviews?.find(review => review.id === req.params.reviewId);
+    if (!review) return res.status(404).json({ error: 'Turn review not found in this conversation.' });
+    if ([...executions.values()].some(run => run.busy || run.connecting || run.dispatchPending || run.reviewFinishing)) return res.status(409).json({ error: 'Wait for active agent work and change tracking to finish before restoring a file.' });
+    const input = z.object({ path: z.string().min(1).max(4096), requestId }).strict().parse(req.body);
+    const key = `review-restore:${session.id}:${review.id}:${input.requestId}`;
+    const previous = store.get<{ path: string; result: unknown }>(key);
+    if (previous) return previous.path === input.path ? res.json(previous.result) : res.status(409).json({ error: 'Request ID reused for a different restore.' });
+    const result = await turnReviews.restore(review, input.path);
+    store.set(key, { path: input.path, result }); res.json(result);
+  });
+  app.post('/api/sessions/:id/agent', (req, res) => {
+    let session = findSession(req.params.id);
+    const { agentId } = z.object({ agentId: requestId }).strict().parse(req.body);
+    const agent = agents.get(agentId);
+    const run = executions.get(session.id);
+    if (run?.busy || run?.connecting || run?.dispatchPending) return res.status(409).json({ error: 'Wait for this conversation to finish before choosing another agent.' });
+    if (session.agentId !== agentId) {
+      if (session.threadId || session.messages.length) session = newSession(undefined, agentId);
+      else {
+        const runtime = run?.runtime;
+        if (run) run.runtime = undefined;
+        executions.delete(session.id); runtime?.close();
+        session.agentId = agentId;
+        session.settings = agent.kind === 'codex' ? structuredClone(runtimeState.settings) : agentSettingsSchema.parse({ model: agent.model ?? '' });
+        session.status = 'idle'; session.activities = [];
+      }
+    }
+    activeSessionId = session.id;
+    defaultAgentId = agentId; store.set('defaultAgentId', agentId);
+    persist(); emit({ type: 'state', state: state() }); res.json(session);
+  });
   app.post('/api/sessions/:id/settings', (req, res) => {
     const session = findSession(req.params.id);
     const remember = z.enum(['true']).optional().parse(req.query.remember) === 'true';
-    const settings = updateSettings(session.settings ?? runtimeState.settings, req.body);
-    const defaults = remember ? updateSettings(runtimeState.settings, req.body) : undefined;
+    const settings = updateSettings(session.settings ?? runtimeState.settings, req.body, session);
+    const defaults = remember ? updateSettings(runtimeState.settings, req.body, session) : undefined;
+    if (remember && session.agentId !== 'codex') return res.status(400).json({ error: 'Set provider defaults in Manage agents.' });
     session.settings = settings;
     if (defaults) {
       runtimeState.settings = defaults; runtimeState.model = defaults.model;
@@ -578,23 +797,37 @@ export function createApplication(options: ApplicationOptions) {
   });
   app.post('/api/sessions/:id/messages', async (req, res) => {
     const session = findSession(req.params.id); const input = messageSchema.parse(req.body);
-    const receiptKey = `message:${session.id}:${input.requestId}`; const previous = store.get<any>(receiptKey);
-    if (previous) {
-      if (previous.input !== JSON.stringify(input)) return res.status(409).json({ error: 'Request ID reused with different message content.' });
-      return res.json(previous.result);
-    }
+    await executions.get(session.id)?.reviewFinishing;
+    const receiptKey = `message:${session.id}:${input.requestId}`; const serializedInput = JSON.stringify(input);
+    const replayReceipt = () => {
+      const previous = store.get<any>(receiptKey);
+      if (!previous) return false;
+      if (previous.input !== serializedInput) res.status(409).json({ error: 'Request ID reused with different message content.' });
+      else res.json(previous.result);
+      return true;
+    };
+    if (replayReceipt()) return;
     const run = execution(session);
+    const attachments = contextAttachments.get(input.attachments);
+    const images = contextAttachments.images(attachments);
+    if (images.length) {
+      await connectRuntime(session);
+      if (run.capabilities?.imageInput === false) return res.status(400).json({ error: 'This agent does not support image input. Choose an image-capable agent or remove the image.' });
+    }
+    // Image negotiation yields to other submissions; only one may accept this request ID.
+    if (replayReceipt()) return;
     const runtime = run.runtime;
     const board = store.board();
-    const message = { id: input.requestId, role: 'user' as const, text: input.text, createdAt: now(), canvasReference: { boardId: board.id, revision: board.revision, elementIds: input.selection.elementIds } };
-    session.messages.push(message); if (session.title === 'New session') session.title = input.text.slice(0, 60);
-    const result = { ok: true, messageId: message.id, status: run.busy ? 'update' : 'accepted' };
-    store.set(receiptKey, { input: JSON.stringify(input), result }); sessionChanged(session);
-    if (run.busy) {
-      if (runtime?.activeTurnId && session.status === 'running') {
+    const occupied = run.busy || run.dispatchPending > 0;
+    const message = { id: input.requestId, role: 'user' as const, text: input.text, ...(attachments.length ? { attachments, contextText: contextAttachments.format(attachments) } : {}), createdAt: now(), canvasReference: { boardId: board.id, revision: board.revision, elementIds: input.selection.elementIds } };
+    session.messages.push(message); if (session.title === 'New session') session.title = input.text.slice(0, 60) || attachments[0]?.label || 'New session';
+    const result = { ok: true, messageId: message.id, status: occupied ? 'update' : 'accepted' };
+    store.set(receiptKey, { input: serializedInput, result }); sessionChanged(session);
+    if (occupied) {
+      if (run.busy && runtime?.activeTurnId && session.status === 'running' && run.capabilities?.steering) {
         try {
           const current = context(session, input.selection);
-          await runtime.steer(`${input.text}\n\n[Current canvas resource context]\n${JSON.stringify(current)}`, runtime.activeTurnId);
+          await runtime.steer(`${input.text}${message.contextText ? `\n\n${message.contextText}` : ''}\n\n[Current canvas resource context]\n${JSON.stringify(current)}`, runtime.activeTurnId, images);
           session.contextRevision = current.revision;
           if (run.pendingNotice && run.pendingNotice.throughRevision <= current.revision) run.pendingNotice = undefined;
           run.noticeDeliveryBlocked = false;
@@ -605,6 +838,7 @@ export function createApplication(options: ApplicationOptions) {
           sessionChanged(session);
         }
       } else { session.queued.push({ id: input.requestId, text: input.text, selection: input.selection }); systemMessage(session, 'Message queued for the next turn.'); sessionChanged(session); }
+      drainQueued(session, run);
     } else { try { await dispatch(session, input.text, input.selection, input.requestId); } catch (error) { failTurn(session, error); } }
     res.status(202).json(result);
   });
@@ -701,7 +935,9 @@ export function createApplication(options: ApplicationOptions) {
         run.runtime?.close();
       }
       for (const pending of captures.values()) { clearTimeout(pending.timer); pending.reject(new Error('Application closed.')); } captures.clear();
+      await Promise.allSettled([...executions.values()].flatMap(run => run.reviewFinishing ? [run.reviewFinishing] : []));
       persist(); for (const socket of sockets) socket.terminate(); wss.close();
+      agents.clearKeys();
       await terminals.close();
       await new Promise<void>(resolveClose => { if (!server.listening) return resolveClose(); server.close(() => resolveClose()); server.closeAllConnections(); }); store.close();
     },

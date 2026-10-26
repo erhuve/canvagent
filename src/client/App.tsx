@@ -5,6 +5,7 @@ import { Icon } from "./icons";
 import { ChatWorkspace } from "./ChatWorkspace";
 import { RightPanel, type RightPanelHandle } from "./RightPanel";
 import { ConversationFiles } from './ConversationFiles';
+import { ConversationReview } from './TurnReview';
 import { desktopInvoke, hasDesktopBridge } from "./desktop";
 import { useBoard } from "./useBoard";
 import { useNotifications } from "./useNotifications";
@@ -12,6 +13,8 @@ import { CanvasWebsiteTools, useCanvasWebsites, validateCanvasWebsite } from './
 import type { AppState, Approval, ProjectSummary } from "./types";
 import { canAcceptEmptyElicitation } from "../shared/elicitation";
 import type { AgentSettings } from "../shared/settings";
+import type { AgentDefinition } from "../shared/agents";
+import type { ContextAttachment } from "../shared/context";
 
 function ApprovalCard({ approval, sessionId, onError }: { approval: Approval; sessionId: string; onError: (message: string) => void }) {
   const [deciding, setDeciding] = useState(false);
@@ -28,14 +31,14 @@ function ApprovalCard({ approval, sessionId, onError }: { approval: Approval; se
   };
   return <div className="approval-card">
     <div className="approval-heading"><Icon name="warning" size={16} /><strong>{approval.title || "Your approval is needed"}</strong></div>
-    <p>{approval.description || approval.reason || "Codex is requesting permission to continue this operation."}</p>
+    <p>{approval.description || approval.reason || "The agent is requesting permission to continue this operation."}</p>
     {elicitation && typeof approval.params?._meta?.subtitle === "string" && <p>{approval.params._meta.subtitle}</p>}
     {elicitation && !canAcceptEmptyElicitation(approval.params || {}) && <p role="status">This request needs a form or verification flow that Canvagent cannot display yet. You can deny or cancel the request.</p>}
     {command && <pre>{Array.isArray(command) ? command.join(" ") : command}</pre>}
     {approval.params?.permissions && <pre>{JSON.stringify(approval.params.permissions, null, 2)}</pre>}
     {(approval.cwd || approval.params?.cwd) && <span className="approval-cwd">{approval.cwd || approval.params.cwd}</span>}
     {questions.map(question => <fieldset className="agent-question" key={question.id}><legend>{question.question || question.header || "Your answer"}</legend>{question.options?.map((option: any) => <label key={option.label}><input type="radio" name={`${approval.id}-${question.id}`} value={option.label} checked={answers[question.id] === option.label} onChange={() => setAnswers(previous => ({ ...previous, [question.id]: option.label }))} /><span><strong>{option.label}</strong>{option.description && <small>{option.description}</small>}</span></label>)}<input className="question-custom-answer" aria-label={`Answer: ${question.question || question.id}`} placeholder={question.options?.length ? "Or write an answer…" : "Your answer…"} type={question.isSecret ? "password" : "text"} value={question.options?.some((option: any) => option.label === answers[question.id]) ? "" : answers[question.id] || ""} onChange={event => setAnswers(previous => ({ ...previous, [question.id]: event.target.value }))} /></fieldset>)}
-    <div className="approval-actions">{choices.map(choice => <button key={choice} className={choice === "accept" || choice === "answer" ? "button-dark" : ""} onClick={() => void decide(choice)} disabled={deciding || (choice === "answer" && (!questions.length || questions.some(question => !answers[question.id]?.trim())))}>{deciding ? "Sending…" : labels[choice] || choice}</button>)}</div>
+    <div className="approval-actions">{choices.map(choice => <button key={choice} className={choice === "accept" || choice === "answer" ? "button-dark" : ""} onClick={() => void decide(choice)} disabled={deciding || (choice === "answer" && (!questions.length || questions.some(question => !answers[question.id]?.trim())))}>{deciding ? "Sending…" : approval.params?.options?.find((option: any) => option.optionId === choice)?.name || labels[choice] || choice}</button>)}</div>
   </div>;
 }
 
@@ -57,8 +60,9 @@ export default function App() {
   const [sendingIds, setSendingIds] = useState<Set<string>>(new Set());
   const [connecting, setConnecting] = useState(false);
   const latestRuntime = useRef<AppState['runtime']>();
-  const automaticConnectionAttempted = useRef(false);
+  const automaticConnections = useRef(new Set<string>());
   const connectionRequest = useRef<Promise<void>>();
+  const connectionTarget = useRef<string>();
   const [settingsSaving, setSettingsSaving] = useState(false);
   const [sessionBusy, setSessionBusy] = useState(false);
   const [notices, setNotices] = useState<Record<string, { id: string; text: string }>>({});
@@ -90,12 +94,13 @@ export default function App() {
     setInitialError("");
   }, []);
 
-  const connectRuntime = useCallback(() => {
-    if (connectionRequest.current) return connectionRequest.current;
+  const connectRuntime = useCallback(function connect(sessionId?: string): Promise<void> {
+    if (connectionRequest.current) return connectionTarget.current === sessionId ? connectionRequest.current : connectionRequest.current.then(() => connect(sessionId));
+    connectionTarget.current = sessionId;
     setConnecting(true);
     const request = (async () => {
       try {
-        await api("/api/runtime/connect", {});
+        await api("/api/runtime/connect", { sessionId });
         applyState(await api<AppState>("/api/state"));
       } catch (error) { notify(errorMessage(error)); }
       finally { connectionRequest.current = undefined; setConnecting(false); }
@@ -131,11 +136,6 @@ export default function App() {
       socket = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}${apiPath("/api/events")}`);
       socket.onopen = () => {
         attempts = 0; setOnline(true);
-        if (!automaticConnectionAttempted.current) {
-          automaticConnectionAttempted.current = true;
-          const runtime = latestRuntime.current;
-          if (!runtime?.connected || !runtime.authenticated) void connectRuntime();
-        }
       };
       socket.onmessage = event => {
         try {
@@ -200,6 +200,14 @@ export default function App() {
   }, [canvas.saveStatus]);
 
   const session = state?.sessions.find(candidate => candidate.id === state.activeSessionId) || state?.sessions.at(-1);
+  useEffect(() => {
+    if (!session || !online) return;
+    const key = `${session.id}:${session.agentId ?? 'codex'}`;
+    if (automaticConnections.current.has(key)) return;
+    automaticConnections.current.add(key);
+    if (!state?.runtime.connected || !state.runtime.authenticated) void connectRuntime(session.id);
+  }, [session?.id, session?.agentId, online, connectRuntime]);
+  const agentName = state?.agents.find(agent => agent.id === (session?.agentId ?? "codex"))?.name ?? "Agent";
   const sending = !!session && sendingIds.has(session.id);
   const currentBoard = canvas.board || state?.board;
   const visibleElementCount = canvas.elementCount;
@@ -227,8 +235,31 @@ export default function App() {
     finally { setSessionBusy(false); }
   };
 
-  const send = async (text: string) => {
-    if (!text.trim()) return;
+  const selectAgent = async (agentId: string) => {
+    if (!session) return;
+    setSessionBusy(true);
+    try {
+      if (!await canvas.flush()) throw new Error('Save or resolve your canvas edits before choosing another agent.');
+      await connectionRequest.current;
+      await api(`/api/sessions/${encodeURIComponent(session.id)}/agent`, { agentId });
+      await refresh();
+    } finally { setSessionBusy(false); }
+  };
+  const saveAgent = async (agent: Partial<AgentDefinition> & { apiKey?: string }) => {
+    await api('/api/agents', agent);
+    const incoming = await refresh();
+    const active = incoming.sessions.find(item => item.id === incoming.activeSessionId);
+    if (active && active.agentId === agent.id) await connectRuntime(active.id);
+  };
+  const removeAgent = async (agentId: string) => {
+    await api(`/api/agents/${encodeURIComponent(agentId)}/remove`, {});
+    const incoming = await refresh();
+    const active = incoming.sessions.find(item => item.id === incoming.activeSessionId);
+    if (active && !incoming.runtime.connected) await connectRuntime(active.id);
+  };
+
+  const send = async (text: string, attachments: ContextAttachment[] = []) => {
+    if (!text.trim() && !attachments.length) return;
     if (!online) throw new Error("Reconnect to the local service before sending.");
     let target = session;
     if (!target) target = await createSession();
@@ -240,9 +271,9 @@ export default function App() {
     setSendingIds(new Set(sendingRef.current));
     try {
       if (!await canvas.flush()) throw new Error("Your message is ready. Resolve the canvas save first so the agent receives the right version.");
-      const key = JSON.stringify([targetId, text.trim(), selectedIds]);
+      const key = JSON.stringify([targetId, text.trim(), selectedIds, attachments.map(attachment => attachment.id)]);
       if (submissions.current.get(targetId)?.key !== key) submissions.current.set(targetId, { key, requestId: crypto.randomUUID() });
-      await api(`/api/sessions/${encodeURIComponent(targetId)}/messages`, { text: text.trim(), requestId: submissions.current.get(targetId)!.requestId, selection: { elementIds: selectedIds } });
+      await api(`/api/sessions/${encodeURIComponent(targetId)}/messages`, { text: text.trim(), attachments: attachments.map(attachment => attachment.id), requestId: submissions.current.get(targetId)!.requestId, selection: { elementIds: selectedIds } });
       submissions.current.delete(targetId);
     } finally { sendingRef.current.delete(targetId); setSendingIds(new Set(sendingRef.current)); }
   };
@@ -271,7 +302,9 @@ export default function App() {
     } finally { setSettingsSaving(false); }
   };
 
-  const askSelection = () => {
+  const askSelection = async () => {
+    if (!await canvas.flush()) { notify('Save or resolve the canvas edits before attaching the selection.'); return; }
+    window.dispatchEvent(new CustomEvent('canvagent:attach-context', { detail: { reference: { kind: 'canvas', elementIds: [...canvas.selectedIds] }, projectWorkspace: state?.project.workspace } }));
     setDraftRequest(previous => ({ id: (previous?.id ?? 0) + 1, text: "Help me work on the selected part of the canvas." }));
   };
 
@@ -338,7 +371,7 @@ export default function App() {
       if (panel.current && !await panel.current.prepareToLeave()) return;
       const snapshot = await hostApi<{ projects: Pick<ProjectSummary, "sessions">[] }>("/api/projects").catch(() => ({ projects: projects.length ? projects : [{ sessions: state?.sessions ?? [] }] }));
       const active = snapshot.projects.some(project => project.sessions.some(item => ['starting', 'running', 'awaiting_approval'].includes(item.status)));
-      if (active && !window.confirm("Codex is still working. Stop all active turns in all projects and quit Canvagent?")) return;
+      if (active && !window.confirm("An agent is still working. Stop all active turns in all projects and quit Canvagent?")) return;
       await desktopInvoke('quit_application');
     } catch (error) { notify(errorMessage(error)); }
     finally { desktopBusy.current = false; }
@@ -368,7 +401,8 @@ export default function App() {
       projects={projects} onActivateProject={navigateProject} notifications={notifications}
       notice={session ? notices[session.id]?.text ?? "" : ""} draftRequest={draftRequest} selectedIds={canvas.selectedIds}
       onClearSelection={() => canvas.selectElements([])} onSend={send} onNewSession={createSession}
-      onActivateSession={activateSession} onConnect={() => void connectRuntime()} onInterrupt={interrupt}
+      onActivateSession={activateSession} onConnect={() => void connectRuntime(session?.id)} onInterrupt={interrupt}
+      onSelectAgent={selectAgent} onSaveAgent={saveAgent} onRemoveAgent={removeAgent}
       onChangeSettings={changeSettings} onSaveDefaultSettings={saveDefaultSettings} settingsSaving={settingsSaving}
       onError={notify} onDismissNotice={() => { if (session) setNotices(previous => ({ ...previous, [session.id]: { id: previous[session.id]?.id ?? "", text: "" } })); }}
       onOpenWorkspace={() => void openProject()}
@@ -376,13 +410,14 @@ export default function App() {
         {session?.pendingApprovals.map(approval => <ApprovalCard key={approval.id} approval={approval} sessionId={session.id} onError={notify} />)}
         {session?.error && <div className="inline-error" role="alert"><Icon name="warning" size={16} /><span>{session.error}</span></div>}
         {session?.status === "unknown" && <div className="inline-error" role="alert"><Icon name="warning" size={16} /><span>The runtime disconnected. Reconnect, then send a message to resume this conversation.</span></div>}
+        {session && <ConversationReview sessionId={session.id} reviews={session.reviews ?? []} onCanvasReview={ids => { window.dispatchEvent(new Event('canvagent:show-canvas')); canvas.selectElements(ids); }} onRestored={() => notify('File restored on disk. Reload any open editor buffer to see it.')} />}
         <ConversationFiles key={session?.id} artifacts={state?.artifacts.filter(artifact => artifact.sessionId === session?.id) ?? []} />
         {initialError && <div className="inline-error" role="alert"><Icon name="warning" size={16} /><span>{initialError}</span></div>}
       </>}
     >
-      <RightPanel ref={panel} projectName={state?.project.name ?? "Project"} projectKey={projectBasePath} onError={notify}>
+      <RightPanel ref={panel} contextSessionId={session?.id} projectName={state?.project.name ?? "Project"} projectKey={projectBasePath} onError={notify}>
       <section className="canvas-pane" aria-label="Shared canvas">
-        <div className="canvas-toolbar"><div className="canvas-title"><Icon name="board" size={16} /><strong>Shared canvas</strong><span className="shared-badge">YOU + CODEX</span></div><div className="canvas-toolbar-actions">{canvas.agentMutation && <button className="toolbar-button" title="Undo the last agent canvas edit safely" onClick={() => void canvas.undoAgent()}><Icon name="undo" size={15} /><span>Undo agent edit</span></button>}<button className="toolbar-button" title="Download an editable Excalidraw file" onClick={canvas.exportBoard} disabled={!currentBoard}><Icon name="download" size={15} /><span>Export</span></button><span className="toolbar-separator" /><button className="selection-action" disabled={!canvas.selectedIds.length} onClick={askSelection}><Icon name="select" size={14} /><span>Ask about selection</span></button></div></div>
+        <div className="canvas-toolbar"><div className="canvas-title"><Icon name="board" size={16} /><strong>Shared canvas</strong><span className="shared-badge">YOU + {agentName.toUpperCase()}</span></div><div className="canvas-toolbar-actions">{canvas.agentMutation && <button className="toolbar-button" title="Undo the last agent canvas edit safely" onClick={() => void canvas.undoAgent()}><Icon name="undo" size={15} /><span>Undo agent edit</span></button>}<button className="toolbar-button" title="Download an editable Excalidraw file" onClick={canvas.exportBoard} disabled={!currentBoard}><Icon name="download" size={15} /><span>Export</span></button><span className="toolbar-separator" /><button className="selection-action" disabled={!canvas.selectedIds.length} onClick={askSelection}><Icon name="select" size={14} /><span>Ask about selection</span></button></div></div>
         <CanvasWebsiteTools controller={websites} ready={!!currentBoard} />
 
         {canvas.saveStatus === "conflict" && <div className="conflict-banner"><Icon name="warning" size={17} /><div><strong>Some objects changed while you were drawing.</strong><span>Your local edits are still here. Choose which version to keep for the conflicting objects.</span></div><button onClick={() => canvas.resolveConflict(false)}>Use saved edits</button><button className="button-dark" onClick={() => canvas.resolveConflict(true)}>Keep my edits</button></div>}
@@ -391,11 +426,11 @@ export default function App() {
 
         <div className="canvas-editor">
           {currentBoard ? <Excalidraw excalidrawAPI={bindCanvas} initialData={{ elements: structuredClone(currentBoard.elements) as any, files: structuredClone(currentBoard.files), appState: { viewBackgroundColor: currentBoard.elements.some(element => !element.isDeleted && element.type === 'embeddable') ? "transparent" : "#fcfcfa", currentItemStrokeColor: "#293a32", currentItemFontFamily: 5, gridSize: 20 } }} onChange={onCanvasChange} onPointerDown={canvas.onPointerDown} onPointerUp={canvas.onPointerUp} validateEmbeddable={validateCanvasWebsite} renderEmbeddable={websites.renderEmbeddable} theme="light" name="Canvagent shared canvas" UIOptions={{ canvasActions: { toggleTheme: false, changeViewBackgroundColor: websites.websites.length === 0 } }} /> : <div className="canvas-loading"><span className="working-spinner" /><span>{initialError ? "Waiting for the local service" : "Opening your canvas"}</span></div>}
-          {currentBoard && visibleElementCount === 0 && <div className="canvas-empty" aria-hidden="true"><Icon name="board" size={29} /><h2>Your shared canvas</h2><p>Draw, paste an image, or sketch an idea.<br />Codex can see and edit what you put here.</p></div>}
-          {canvas.selectedIds.length > 0 && <div className="floating-selection"><span>{canvas.selectedIds.length} selected</span><button onClick={askSelection}><Icon name="spark" size={13} />Ask Codex<Icon name="external" size={11} /></button></div>}
+          {currentBoard && visibleElementCount === 0 && <div className="canvas-empty" aria-hidden="true"><Icon name="board" size={29} /><h2>Your shared canvas</h2><p>Draw, paste an image, or sketch an idea.<br />{agentName} can see and edit what you put here.</p></div>}
+          {canvas.selectedIds.length > 0 && <div className="floating-selection"><span>{canvas.selectedIds.length} selected</span><button onClick={askSelection}><Icon name="spark" size={13} />Ask {agentName}<Icon name="external" size={11} /></button></div>}
         </div>
 
-        <footer className="canvas-footer"><div className={`save-state ${canvas.saveStatus}`}><span className={`status-dot ${canvas.saveStatus === "saving" ? "pulse" : ""}`} /><span>{canvas.saveStatus === "saved" ? "All changes saved" : canvas.saveStatus === "pending" ? "Unsaved changes" : canvas.saveStatus === "saving" ? "Saving changes…" : canvas.saveStatus === "conflict" ? "Choose which edits to keep" : "Changes need saving"}</span>{currentBoard && <span className="revision-label">rev {currentBoard.revision}</span>}</div><div className="canvas-legend"><span><i className="human-dot" />You</span><span><i className="agent-dot" />Codex</span><span className="legend-divider" /><span className="canvas-scope" title={canvas.agentMutation ? "Drawing undo history resets when shared edits arrive. Use Undo agent edit to safely revert Codex changes." : undefined}>{canvas.agentMutation ? "Agent edits have separate undo" : "One shared perspective"}</span></div></footer>
+        <footer className="canvas-footer"><div className={`save-state ${canvas.saveStatus}`}><span className={`status-dot ${canvas.saveStatus === "saving" ? "pulse" : ""}`} /><span>{canvas.saveStatus === "saved" ? "All changes saved" : canvas.saveStatus === "pending" ? "Unsaved changes" : canvas.saveStatus === "saving" ? "Saving changes…" : canvas.saveStatus === "conflict" ? "Choose which edits to keep" : "Changes need saving"}</span>{currentBoard && <span className="revision-label">rev {currentBoard.revision}</span>}</div><div className="canvas-legend"><span><i className="human-dot" />You</span><span><i className="agent-dot" />{agentName}</span><span className="legend-divider" /><span className="canvas-scope" title={canvas.agentMutation ? "Drawing undo history resets when shared edits arrive. Use Undo agent edit to safely revert agent changes." : undefined}>{canvas.agentMutation ? "Agent edits have separate undo" : "One shared perspective"}</span></div></footer>
       </section>
       </RightPanel>
     </ChatWorkspace>

@@ -1,6 +1,6 @@
 # Local implementation
 
-Canvagent now includes a React application, an embedded Excalidraw editor, a local Node.js service, SQLite persistence, and a Codex app-server adapter. The [architecture](architecture.md), [contracts](contracts.md), and [roadmap](roadmap.md) describe the intended design and release gates. This page describes the current code and setup.
+Canvagent now includes a React application, an embedded Excalidraw editor, a local Node.js service, SQLite persistence, and native Codex, ACP, and direct API adapters. The [agent guide](agents.md) describes setup, capabilities, credentials, and current validation limits. The [architecture](architecture.md), [contracts](contracts.md), and [roadmap](roadmap.md) describe the intended design and release gates. This page describes the current code and setup.
 
 The Tauri desktop shell adds a native workspace picker, remembered workspace, menus, a bundled Node 24 runtime, and coordinated shutdown. The macOS Apple Silicon bundle has been built and opened successfully, including a live connection to Codex CLI **0.163.0-alpha.10.2**. The existing browser interface remains available. See the [desktop instructions](../README.md#desktop-app-tauri) for build commands, data locations, and platform limits.
 
@@ -29,7 +29,7 @@ npm run build
 npm start -- --workspace /absolute/path/to/project
 ```
 
-Open `http://127.0.0.1:4317`; Canvagent connects to Codex automatically once the local workspace connection opens. This checks the existing login and model catalog without opening a thread or replaying a turn. A failed attempt or required sign-in leaves **Connect Codex** available for manual retry; WebSocket reconnects do not start a retry loop. The workspace must already exist. These options select a different state directory or port:
+Open `http://127.0.0.1:4317`; Canvagent connects to Codex automatically once the local workspace connection opens. This checks the existing login and model catalog without opening a thread or replaying a turn. Choose another harness or API provider using the composer’s agent picker. A failed attempt or required sign-in leaves **Retry** beside the composer for manual retry; WebSocket reconnects do not start a retry loop. The workspace must already exist. These options select a different state directory or port:
 
 ```sh
 npm start -- --workspace /absolute/path/to/project --data-dir /absolute/path/to/data --port 4317

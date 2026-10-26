@@ -1,5 +1,21 @@
 # Architecture
 
+## Agent portability update — October 2026
+
+The [Zed review](zed-research.md) extends the original Codex-first design below. `AgentRuntime` describes the common connection/open/start/steer/interrupt/approval lifecycle. `CodexRuntime` preserves native Codex behavior, `AcpRuntime` adapts stable ACP v1 stdio, and `ApiRuntime` owns a bounded tool loop for OpenAI-compatible Chat Completions and Anthropic Messages. See [agent setup and limitations](agents.md).
+
+Project-local definitions contain stable IDs, connection types, executable/argument boundaries, model/endpoint metadata, and environment-variable references. Sessions persist `agentId` beside `threadId`. Changing agents with saved history creates a new session. Execution metadata and capabilities are conversation-scoped; background connections cannot imply that another agent is ready. Only verified steering receives live canvas notices; other adapters queue user messages for fresh dispatch context.
+
+Pasted API keys are write-only process memory, separate from SQLite configuration. Custom endpoints never implicitly receive default provider credentials. API restoration uses the persisted visible transcript without replaying tools. Workspace mutations and commands require approval, edits retain existing revision guards, and commands receive cancellation signals. Approved commands have local user authority; Codex sandbox settings do not describe API execution.
+
+ACP forwards the existing scoped canvas endpoint over HTTP when advertised, otherwise through a self-contained stdio bridge bundled as JavaScript source. Both retain active-turn authorization, revision checks, provenance, and image results. ACP filesystem/terminal delegation remains unadvertised. Resume requires advertised `loadSession`; permission answers retain exact native option IDs.
+
+The composer owns visible, removable context chips and `@mentions`. The context service captures immutable file/range, folder, conversation, canvas, and artifact snapshots when attached. Images are validated and stored as managed bytes; drafts and messages retain references, while the adapter boundary hydrates native multimodal inputs. Queued messages retain their explicit attachment snapshots and receive fresh automatic canvas context at dispatch. Image input is capability-gated, including ACP negotiation. See [context and review](context-and-review.md).
+
+Each dispatched turn also captures bounded before/after workspace and canvas snapshots. Saved diffs describe changes observed during that interval, including concurrent edits, rather than claiming exclusive agent authorship. File restoration checks the current ending revision, rejects active agent work, and preserves newer edits. This conversation review complements the current Git Changes panel; it does not require a Git repository or roll back an entire checkout.
+
+The following sections retain the original design rationale; references to Codex-owned history/authentication apply to the Codex adapter.
+
 Canvagent is a local agent harness with chat and a persistent canvas shared by the user and agent. The first implementation reuses Codex's runtime and embeds Excalidraw. The local Canvagent service coordinates both surfaces and owns the saved board.
 
 This is the proposed v1 design. The [roadmap](roadmap.md) grows a small working application incrementally; the [contracts](contracts.md) describe the target boundaries, implemented as their features arrive. See the [adversarial review](adversarial-review.md) for the practical tradeoffs.

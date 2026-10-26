@@ -9,7 +9,7 @@ const { values } = parseArgs({ options: {
 } });
 if (values.help) {
   console.log('Usage: npm start -- [--workspace /path/to/project] [--data-dir /path/to/data] [--port 4317]');
-  console.log('Uses your existing Codex CLI login. Open the printed local URL for chat and the shared canvas.');
+  console.log('Choose an installed agent harness or model API beside the composer. Open the printed local URL for chat and the shared canvas.');
   process.exit(0);
 }
 const workspace = resolve(values.workspace ?? process.env.CANVAGENT_WORKSPACE ?? process.cwd());

@@ -18,9 +18,9 @@ async function prepare(page: Page) {
   const reset = await page.request.post(new URL('api/settings', page.url()).href, { data: defaultAgentSettings() });
   expect(reset.ok()).toBe(true);
   await newConversation(page);
-  const connect = page.getByRole('button', { name: 'Connect Codex', exact: true });
+  const connect = page.getByRole('button', { name: 'Retry agent connection', exact: true });
   if (await connect.isVisible()) await connect.click();
-  await expect(page.getByRole('button', { name: 'Codex connected', exact: true })).toBeVisible();
+  await expect(page.getByRole('status', { name: 'Codex connected', exact: true })).toBeVisible();
 }
 async function openSettings(page: Page) {
   await page.getByRole('button', { name: 'More Codex settings', exact: true }).click();

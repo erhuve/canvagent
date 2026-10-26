@@ -29,9 +29,9 @@ test('a distant object does not change regional pixels and a huge blank capture 
   await page.mouse.up();
   await page.keyboard.press('v');
   await expect.poll(async () => (await savedState(page)).board.elements.filter((element: any) => !element.isDeleted).length).toBe(1);
-  const connect = page.getByRole('button', { name: 'Connect Codex', exact: true });
+  const connect = page.getByRole('button', { name: 'Retry agent connection', exact: true });
   if (await connect.isVisible()) await connect.click();
-  await expect(page.getByRole('button', { name: 'Codex connected', exact: true })).toBeVisible();
+  await expect(page.getByRole('status', { name: 'Codex connected', exact: true })).toBeVisible();
   await page.getByRole('textbox', { name: 'Message Codex' }).fill('[regional-capture] Check the selected region before and after adding a distant object.');
   await page.getByRole('button', { name: 'Send message to Codex' }).click();
   await expect(page.getByText('Regional capture checks complete.')).toBeVisible();

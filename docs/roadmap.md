@@ -1,5 +1,29 @@
 # Phases of work
 
+## Agent portability and Zed-inspired delivery — October 2026
+
+The [source review and feature matrix](zed-research.md) records the research, alternatives, dependencies, and acceptance checks against an immutable Zed commit. This delivery order extends the original phases below.
+
+| Milestone | Implementation | Status |
+| --- | --- | --- |
+| Agent choice belongs to conversations | Composer picker, agent manager, contextual retry, stable session ownership, existing-session migration | Implemented |
+| Bring an installed harness | Native Codex; ACP v1 Claude Code/OpenCode/Gemini presets; configurable executable/args/env references | Implemented; authenticated external inference needs live verification |
+| Shared canvas across harnesses | HTTP MCP negotiation plus stdio bridge; text/tool activity, exact permissions, cancel, advertised native resume | Implemented and fixture-tested |
+| Bring a model API | OpenAI-compatible and Anthropic loop; canvas/artifacts; workspace read/search/edit/create and approved executable commands | Implemented; paid provider inference needs live verification |
+| Review completed work | Changes panel plus conversation-linked before/after snapshots, canvas reveal, and guarded file restoration | Implemented |
+| Smooth agent setup | Capability-aware diagnostics, explicit registry discovery/install with pinned versions, native credential store, API response streaming | Next |
+| Safer parallel coding | Conversation-bound worktrees, setup hooks, diff/hunk staging, worktree lifecycle | Next, after review panel |
+| Visible chat context and images | @mentions, file/line/canvas/conversation/artifact chips, frozen previews, clipboard/drop/file images, persisted multimodal messages | Implemented |
+| Reusable context and history | MCP manager, search/archive/export, capability-gated import | Follow-up |
+| Deeper workflows | Named terminal conversations, saved commands, skills/profiles, follow-agent and inline edit review | Follow-up |
+| Editor expansion | LSP, DAP, SSH, multi-root and collaboration evaluated separately with product cases | Later |
+
+Ship gates: keep existing native Codex identity and runtime tests passing; exercise ACP/API with deterministic local fixtures; verify keys never appear in returned or persisted configuration; verify approval denial/cancel prevents tools; check actual browser navigation and picker behavior. See the [validation record](agent-portability-validation.md). Mock protocol coverage is not evidence of authenticated model inference. Record live harness versions when that validation is performed.
+
+The next worktree milestone must bind runtime cwd, terminal cwd, file access, Git review, and canvas/artifact ownership explicitly. Preserve background turns and drafts during navigation, and never silently move existing native sessions to another checkout. Registry installation and OS credential persistence remain separate from choosing an agent or starting a task.
+
+## Original local-v1 phases
+
 Build a conventional local agent harness with a shared canvas available throughout each session. Keep a small end-to-end application running as capabilities are added.
 
 The local-v1 code described by phases 0 through 5 is now implemented. Automated store, protocol, application, and browser checks exercise the shared interaction. Real model inference and its live canvas behavior still need verification with a fresh Codex login; the inherited cloud login returned an authorization error. See [implementation evidence](implementation.md#runtime-status) for the precise boundary. The phases below retain their goals and acceptance checks for ongoing development.

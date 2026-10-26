@@ -1,0 +1,54 @@
+.conversation-review { margin-top: 16px; }
+.turn-review-summary { display: flex; align-items: center; gap: 9px; width: 100%; padding: 12px 13px; border: 1px solid var(--line, #e7e7ee); border-radius: 9px; background: #fff; text-align: left; color: #626273; cursor: pointer; }
+.turn-review-summary:hover { background: #fafafd; color: #454557; }
+.turn-review-summary > span { flex: 1; min-width: 0; }
+.turn-review-summary strong { display: block; font-size: 12px; font-weight: 500; }
+.turn-review-summary small { display: block; margin-top: 4px; color: #858592; font-size: 11px; }
+.turn-review-tracking { display: flex; align-items: center; gap: 7px; padding: 9px 3px; color: #858592; font-size: 11px; }
+.turn-review-dialog { width: min(1080px, calc(100vw - 40px)); max-width: calc(100vw - 40px); height: min(760px, calc(100dvh - 60px)); max-height: calc(100dvh - 60px); padding: 0; border: 1px solid #e1e1e9; border-radius: 12px; background: #fff; color: #454552; box-shadow: 0 18px 70px #25253b26; overflow: hidden; }
+.turn-review-dialog[open] { display: flex; flex-direction: column; }
+.turn-review-dialog::backdrop { background: #2525355c; }
+.turn-review-heading { display: flex; flex-shrink: 0; align-items: flex-start; gap: 12px; padding: 18px 20px 13px; border-bottom: 1px solid #ededf2; }
+.turn-review-heading > div { flex: 1; min-width: 0; }
+.turn-review-heading h2 { margin: 0; font-size: 16px; font-weight: 600; }
+.turn-review-heading p { margin: 7px 0 0; color: #858591; font-size: 11px; line-height: 1.6; }
+.turn-review-controls { display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; gap: 12px; padding: 10px 20px; border-bottom: 1px solid #ededf2; font-size: 11px; }
+.turn-review-status { color: #777785; }
+.turn-review-controls label { display: flex; gap: 7px; align-items: center; min-width: 0; }
+.turn-review-controls select { width: min(350px, 40vw); min-width: 0; font-size: 11px; padding: 5px; border: 1px solid #e4e4eb; border-radius: 5px; background: #fff; color: #626273; }
+.turn-review-layout { display: flex; flex: 1; min-width: 0; min-height: 0; }
+.turn-review-files { flex: 0 0 235px; min-width: 0; padding: 7px; border-right: 1px solid #ededf2; overflow: auto; background: #fbfbfd; }
+.turn-review-files > button { display: flex; align-items: flex-start; gap: 7px; width: 100%; padding: 9px 7px; border-radius: 5px; text-align: left; color: #777785; font-size: 11px; cursor: pointer; }
+.turn-review-files > button:hover { background: #f1f0f7; }
+.turn-review-files > button[aria-pressed="true"] { background: #eeecf8; color: #5d567b; }
+.turn-review-files > button > span { flex: 1; min-width: 0; overflow-wrap: anywhere; line-height: 1.5; }
+.turn-review-files small { padding-top: 2px; font-size: 9px; color: #8a8a98; }
+.turn-review-files svg { margin-top: 1px; flex-shrink: 0; }
+.turn-review-files > p { margin: 10px; color: #858592; font-size: 11px; line-height: 1.7; }
+.turn-review-canvas { margin-top: 6px; border-top: 1px solid #ededf2; }
+.turn-review-content { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; }
+.turn-review-file-heading { display: flex; flex-direction: column; flex-shrink: 0; gap: 5px; padding: 10px 14px; border-bottom: 1px solid #ededf2; }
+.turn-review-file-heading strong { font-size: 11px; font-weight: 500; overflow-wrap: anywhere; }
+.turn-review-file-heading span { color: #92929f; font-size: 10px; }
+.turn-review-diff { flex: 1; min-height: 0; margin: 0; padding: 12px 0; overflow: auto; font: 11px/1.75 ui-monospace, SFMono-Regular, Menlo, Monaco, monospace; tab-size: 4; }
+.turn-review-diff code { display: block; width: max-content; min-width: 100%; }
+.turn-review-diff code > span { display: block; padding: 0 14px; white-space: pre; }
+.turn-diff-meta { color: #7a8195; background: #f5f6f9; }
+.turn-diff-add { color: #32633b; background: #edf7ed; }
+.turn-diff-remove { color: #984f49; background: #fff0ed; }
+.turn-review-empty { display: flex; flex: 1; align-items: center; justify-content: center; margin: 0; padding: 28px; text-align: center; color: #858592; font-size: 12px; line-height: 1.7; }
+.turn-review-error { margin: 0; padding: 10px 14px; color: #9b4b3b; background: #fff4ef; font-size: 11px; line-height: 1.7; overflow-wrap: anywhere; }
+.turn-review-notice { flex-shrink: 0; margin: 0; padding: 9px 20px; background: #fff9ec; color: #886931; font-size: 11px; line-height: 1.7; }
+.turn-review-restore { flex-shrink: 0; max-height: 42%; overflow: auto; padding: 12px 14px; border-top: 1px solid #ededf2; }
+.turn-review-restore button { display: inline-flex; align-items: center; gap: 6px; padding: 6px 9px; border: 1px solid #e2e2ea; border-radius: 5px; color: #777383; background: #fff; font-size: 11px; cursor: pointer; }
+.turn-review-restore button:hover { background: #f7f6fa; }
+.turn-review-dialog button:disabled, .turn-review-dialog select:disabled { opacity: .55; cursor: default; }
+.turn-review-dialog button:focus-visible, .turn-review-summary:focus-visible { outline: 2px solid #9a96c5; outline-offset: 2px; }
+.turn-review-confirm p { margin: 0 0 10px; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.turn-review-confirm small { display: block; margin-top: 5px; font-size: 11px; color: #858592; }
+.turn-review-confirm > div { display: flex; flex-wrap: wrap; gap: 7px; }
+.turn-review-restore .turn-restore-confirm { color: #fff; background: #6e6486; border-color: #6e6486; }
+.turn-review-restore .turn-restore-confirm:hover { background: #5b5173; }
+.turn-review-restore > .turn-review-error { margin-top: 10px; border-radius: 5px; }
+.turn-review-restored { display: flex; align-items: center; gap: 6px; margin: 7px 0 0; font-size: 11px; line-height: 1.6; color: #55754b; }
+@media (max-width: 680px) { .turn-review-dialog { width: calc(100vw - 18px); max-width: calc(100vw - 18px); height: calc(100dvh - 24px); max-height: calc(100dvh - 24px); } .turn-review-heading { padding: 14px; } .turn-review-controls { padding: 9px 14px; flex-wrap: wrap; } .turn-review-controls select { width: min(450px, calc(100vw - 90px)); } .turn-review-layout { flex-direction: column; } .turn-review-files { flex: 0 1 auto; max-height: 145px; border-right: 0; border-bottom: 1px solid #ededf2; } .turn-review-content { min-height: 160px; } .turn-review-notice { padding: 9px 14px; } }

@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "A local Codex harness with a canvas shared by you and your agent",
+  "description": "A local agent workspace with a canvas shared by you and your preferred agent",
   "engines": {
     "node": ">=24.0.0"
   },

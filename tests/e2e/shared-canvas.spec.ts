@@ -53,9 +53,9 @@ test('a real drawing, browser capture, agent note, live notice and safe undo sha
   await page.mouse.up();
   await expect.poll(async () => (await state(page)).board.elements.find((element: any) => element.id === originalId).x).not.toBe(savedRectangle.x);
   expect((await state(page)).board.elements.find((element: any) => element.id === originalId).width).toBe(savedRectangle.width);
-  const connect = page.getByRole('button', { name: 'Connect Codex', exact: true });
+  const connect = page.getByRole('button', { name: 'Retry agent connection', exact: true });
   if (await connect.isVisible()) await connect.click();
-  await expect(page.getByRole('button', { name: 'Codex connected', exact: true })).toBeVisible();
+  await expect(page.getByRole('status', { name: 'Codex connected', exact: true })).toBeVisible();
   await page.getByRole('textbox', { name: 'Message Codex' }).fill('Inspect this sketch and add an editable note. Keep working while I draw.');
   await page.getByRole('button', { name: 'Send message to Codex' }).click();
   await expect(page.getByText(/I inspected the saved board/)).toBeVisible();

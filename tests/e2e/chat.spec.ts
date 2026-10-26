@@ -12,9 +12,9 @@ async function newConversation(page: Page) {
 }
 
 async function connect(page: Page) {
-  const button = page.getByRole('button', { name: 'Connect Codex', exact: true });
+  const button = page.getByRole('button', { name: 'Retry agent connection', exact: true });
   if (await button.isVisible()) await button.click();
-  await expect(page.getByRole('button', { name: 'Codex connected', exact: true })).toBeVisible();
+  await expect(page.getByRole('status', { name: 'Codex connected', exact: true })).toBeVisible();
 }
 
 test('assistant-ui streams markdown, steers the active turn, stops, and switches saved conversations', async ({ page }) => {
@@ -60,7 +60,7 @@ test('a rejected send restores its draft, and native Codex approval controls sti
   await page.route('**/api/sessions/*/messages', route => route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ message: 'Test service is unavailable.' }) }));
   await input.fill('[chat-approval] Check the approval controls.');
   await page.getByRole('button', { name: 'Send message to Codex', exact: true }).click();
-  await expect(page.getByRole('status')).toContainText('Test service is unavailable.');
+  await expect(page.getByRole('status').filter({ hasText: 'Test service is unavailable.' })).toBeVisible();
   await expect(input).toHaveValue('[chat-approval] Check the approval controls.');
   await page.unroute('**/api/sessions/*/messages');
   await page.getByRole('button', { name: 'Send message to Codex', exact: true }).click();

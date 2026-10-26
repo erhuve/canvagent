@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   ActionBarPrimitive,
   AssistantRuntimeProvider,
@@ -14,15 +14,20 @@ import {
 } from "@assistant-ui/react";
 import { MarkdownTextPrimitive } from "@assistant-ui/react-markdown";
 import { defaultAgentSettings, type AgentSettings } from "../shared/settings";
+import type { ContextAttachment } from "../shared/context";
 import { AgentSettingsControls } from "./AgentSettings";
+import { AgentPicker, type SaveAgentInput } from "./AgentPicker";
 import { errorMessage } from "./api";
 import { BrandMark, Icon } from "./icons";
 import { PaneResizeHandle } from "./PaneResizeHandle";
 import { usePaneLayout } from "./usePaneLayout";
 import { Notifications } from './Notifications';
+import { ContextAttachmentList, ContextComposer, useDraftAttachments, type DraftAttachments } from './ContextAttachments';
 import type { NotificationsController } from './useNotifications';
 import type { AppState, Message, ProjectSummary, Session } from "./types";
 
+const AgentNameContext = createContext("Codex");
+const MessageAttachmentsContext = createContext(new Map<string, ContextAttachment[]>());
 const activeStatuses = new Set(["running", "starting", "awaiting_approval"]);
 const titleFor = (session?: Pick<Session, "title">) => !session || session.title === "New session" ? "New conversation" : session.title;
 
@@ -44,7 +49,7 @@ function RunStatus({ status }: { status?: Session["status"] }) {
 }
 
 // The server remains the source of truth for messages and run state. This
-// adapter only projects saved Codex messages into assistant-ui's view model.
+// adapter only projects saved agent messages into assistant-ui's view model.
 export function toChatMessage(message: Message): ThreadMessageLike {
   return {
     id: message.id,
@@ -61,14 +66,19 @@ function Markdown() {
 }
 
 function ChatMessage() {
+  const agentName = useContext(AgentNameContext);
+  const attachmentMap = useContext(MessageAttachmentsContext);
+  const messageId = useAuiState(s => s.message.id);
+  const attachments = attachmentMap.get(messageId) ?? [];
   const role = useAuiState(s => s.message.role);
   const empty = useAuiState(s => s.message.content.every(part => part.type === "text" && !part.text));
   const copied = useAuiState(s => s.message.isCopied);
   return <MessagePrimitive.Root className={`message message-${role}`}>
-    {role === "assistant" && <div className="message-byline"><span className="agent-avatar"><Icon name="terminal" size={14} /></span><strong>Codex</strong></div>}
+    {role === "assistant" && <div className="message-byline"><span className="agent-avatar"><Icon name="terminal" size={14} /></span><strong>{agentName}</strong></div>}
     {role === "system" && <span className="system-label"><Icon name="info" size={14} />System</span>}
     <div className="message-body">
-      {empty ? <span className="thinking-dots" aria-label="Codex is thinking"><i /><i /><i /></span> : <MessagePrimitive.Parts components={{ Text: Markdown }} />}
+      {empty ? role === "assistant" && !attachments.length ? <span className="thinking-dots" aria-label={`${agentName} is thinking`}><i /><i /><i /></span> : null : <MessagePrimitive.Parts components={{ Text: Markdown }} />}
+      <ContextAttachmentList attachments={attachments} transcript />
     </div>
     {role === "assistant" && !empty && <ActionBarPrimitive.Root className="message-actions" hideWhenRunning>
       <ActionBarPrimitive.Copy className="icon-button" aria-label="Copy response" title={copied ? "Copied" : "Copy response"}><Icon name={copied ? "check" : "copy"} size={15} /></ActionBarPrimitive.Copy>
@@ -98,10 +108,13 @@ type WorkspaceProps = {
   draftRequest?: { id: number; text: string };
   selectedIds: string[];
   onClearSelection: () => void;
-  onSend: (text: string) => Promise<void>;
+  onSend: (text: string, attachments?: ContextAttachment[]) => Promise<void>;
   onNewSession: () => Promise<unknown>;
   onActivateSession: (id: string) => Promise<void>;
   onConnect: () => void;
+  onSelectAgent: (agentId: string) => Promise<void>;
+  onSaveAgent: (agent: SaveAgentInput) => Promise<void>;
+  onRemoveAgent: (agentId: string) => Promise<void>;
   onInterrupt: () => Promise<void>;
   settingsSaving?: boolean;
   onChangeSettings: (settings: Partial<AgentSettings>, remember?: boolean) => Promise<void>;
@@ -116,54 +129,79 @@ type WorkspaceProps = {
   children: ReactNode;
 };
 
-function Composer({ props, running, ready, inputRef }: {
+function Composer({ props, running, ready, inputRef, context, setText }: {
   props: WorkspaceProps;
   running: boolean;
   ready: boolean;
   inputRef: React.RefObject<HTMLTextAreaElement>;
+  context: DraftAttachments;
+  setText: (text: string) => void;
 }) {
   const text = useAuiState(s => s.composer.text);
   const session = props.state?.sessions.find(item => item.id === props.state?.activeSessionId) ?? props.state?.sessions.at(-1);
+  const agentId = session?.agentId ?? props.state?.defaultAgentId ?? "codex";
+  const agent = props.state?.agents.find(item => item.id === agentId);
+  const agentName = agent?.name ?? (agentId === "codex" ? "Codex" : "Agent");
   const settings = session?.settings ?? props.state?.runtime.settings ?? defaultAgentSettings();
-  // A running Codex turn accepts immediate steering through the existing API.
-  // Keep that behavior instead of introducing a second, client-owned queue.
+  const steering = props.state?.runtime.capabilities?.steering ?? agent?.kind === "codex";
+  const imageSupported = props.state?.runtime.capabilities?.imageInput !== false;
+  const unsupportedImages = !imageSupported && context.attachments.some(item => item.kind === 'image');
+  const sendLocked = useRef(new Set<string>());
+  const canSend = (!!text.trim() || context.attachments.length > 0) && !props.sending && !props.sessionBusy && ready && props.online && !context.blocked && !unsupportedImages;
+  const statusLabel = props.connecting ? `Connecting to ${agentName}…` : ready ? `${agentName} connected` : `${agentName} needs attention`;
+  const connectionHint = props.connecting
+    ? agent?.kind === "codex" ? `Connecting to ${agentName} with your existing login…` : `Connecting to ${agentName}…`
+    : props.state?.runtime.error || (props.state?.runtime.connected && agent?.kind === "codex" ? "Sign in with codex login, then reconnect." : `Check ${agentName} configuration, then retry.`);
+  // Harnesses without steering receive a queued message for their next turn.
   const sendUpdate = async () => {
-    if (!text.trim() || props.sending || props.sessionBusy || !ready || !props.online) return;
+    const scope = context.scope;
+    if (!canSend || sendLocked.current.has(scope)) return;
+    sendLocked.current.add(scope);
     try {
-      await props.onSend(text);
+      await props.onSend(text, context.attachments);
     } catch (error) { props.onError(errorMessage(error)); }
+    finally { sendLocked.current.delete(scope); }
   };
   return <div className="composer-area">
     {props.notice && <div className="context-notice" role="status"><Icon name="check" size={14} /><span>{props.notice}</span><button onClick={props.onDismissNotice} aria-label="Dismiss update notice"><Icon name="close" size={13} /></button></div>}
-    <ComposerPrimitive.Root className="composer">
+    {!ready && props.state && <div className="agent-connection-note"><Icon name="info" size={13} /><span>{connectionHint}</span>{!props.connecting && <button type="button" aria-label="Retry agent connection" disabled={!props.online || props.sessionBusy} onClick={props.onConnect}><Icon name="reconnect" size={12} />Retry</button>}</div>}
+    <ComposerPrimitive.Root className="composer" onSubmit={event => { event.preventDefault(); void sendUpdate(); }}>
+      <div className="composer-agent-bar">
+        <AgentPicker agents={props.state?.agents ?? []} activeAgentId={agentId} disabled={running || props.sending || props.sessionBusy || !props.state || !props.online} hasMessages={!!session?.messages.length} onSelect={props.onSelectAgent} onSave={props.onSaveAgent} onRemove={props.onRemoveAgent} onError={props.onError} />
+        <span className={`agent-connection-status ${ready ? "ready" : ""}`} role="status" aria-label={statusLabel}><span className={`status-dot ${props.connecting ? "pulse" : ""}`} /><span>{props.connecting ? "Connecting…" : ready ? "Ready" : "Needs attention"}</span></span>
+      </div>
       {props.selectedIds.length > 0 && <div className="selection-chip"><Icon name="select" size={13} /><span>{props.selectedIds.length} {props.selectedIds.length === 1 ? "object" : "objects"} selected</span><button type="button" aria-label="Clear canvas selection" onClick={props.onClearSelection}><Icon name="close" size={12} /></button></div>}
-      <ComposerPrimitive.Input
+      <ContextComposer controller={context} workspace={props.state?.project.workspace} sessionId={session?.id} text={text} setText={setText} inputRef={inputRef} imageSupported={imageSupported} disabled={!props.state || props.sessionBusy || !props.online}>
+      {handlers => <ComposerPrimitive.Input
+        {...handlers}
         ref={inputRef}
-        aria-label="Message Codex"
-        placeholder={running ? "Send an update while Codex works…" : "Message Codex…"}
+        aria-label={`Message ${agentName}`}
+        placeholder={running ? steering ? `Send an update while ${agentName} works…` : `Queue another message for ${agentName}…` : `Message ${agentName}… · @ to add context`}
         className="composer-input"
         rows={2}
         maxRows={7}
-        submitMode="enter"
+        submitMode="none"
+        addAttachmentOnPaste={false}
         autoFocus
         onKeyDown={event => {
-          if (running && event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+          handlers.onKeyDown(event);
+          if (event.defaultPrevented) return;
+          if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
             event.preventDefault();
             void sendUpdate();
           }
         }}
-      />
+      />}
+      </ContextComposer>
       <div className="composer-toolbar">
-        <AgentSettingsControls key={session?.id ?? "new"} settings={settings} defaults={props.state?.runtime.defaults} models={props.state?.runtime.models ?? []} requirements={props.state?.runtime.requirements} running={running} disabled={!props.state || props.sessionBusy} saving={props.settingsSaving} onChange={props.onChangeSettings} onSaveDefaults={props.onSaveDefaultSettings} onError={props.onError} />
+        {agent?.kind === "codex" ? <AgentSettingsControls key={session?.id ?? "new"} settings={settings} defaults={props.state?.runtime.defaults} models={props.state?.runtime.models ?? []} requirements={props.state?.runtime.requirements} running={running} disabled={!props.state || props.sessionBusy} saving={props.settingsSaving} onChange={props.onChangeSettings} onSaveDefaults={props.onSaveDefaultSettings} onError={props.onError} /> : <div className="composer-provider-settings">{agent?.kind === "acp" ? "Models and permissions follow your harness configuration." : agent?.model ? <span title="Model configured in Manage agents">{settings.model || agent.model}</span> : "Configure your provider in Manage agents."}</div>}
         <div className="composer-buttons">
           {running && <ComposerPrimitive.Cancel className="stop-button" aria-label="Stop agent" title="Stop the current turn"><Icon name="stop" size={13} />Stop</ComposerPrimitive.Cancel>}
-          {running
-            ? <button type="button" className="send-button" aria-label="Send update to Codex" title="Send update (Enter)" disabled={!text.trim() || props.sending || props.sessionBusy || !props.online || !ready} onClick={() => void sendUpdate()}><Icon name="arrow" size={18} /></button>
-            : <ComposerPrimitive.Send className="send-button" aria-label="Send message to Codex" title="Send (Enter)"><Icon name="arrow" size={18} /></ComposerPrimitive.Send>}
+          <button type="button" className="send-button" aria-label={running ? steering ? `Send update to ${agentName}` : `Queue message to ${agentName}` : `Send message to ${agentName}`} title={context.blocked ? 'Finish attaching context before sending' : running ? steering ? 'Send update (Enter)' : 'Queue for next turn (Enter)' : 'Send (Enter)'} disabled={!canSend} onClick={() => void sendUpdate()}><Icon name="arrow" size={18} /></button>
         </div>
       </div>
     </ComposerPrimitive.Root>
-    <div className="composer-footer"><span className="canvas-context" title="The current canvas and your selection are included with each message"><Icon name="board" size={12} />Canvas included</span><span>Enter to send · Shift+Enter for newline</span></div>
+    <div className="composer-footer"><span className="canvas-context" title="The current canvas and your selection are included with each message"><Icon name="board" size={12} />Canvas included</span><span>{running && !steering ? "Enter to queue" : "Enter to send"} · Shift+Enter for newline</span></div>
   </div>;
 }
 
@@ -179,11 +217,17 @@ export function ChatWorkspace(props: WorkspaceProps) {
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const runtimeRef = useRef<AssistantRuntime>();
   const drafts = useRef(new Map<string, string>());
+  const draftVersions = useRef(new Map<string, number>());
   const visibleSessionId = useRef<string>();
   const session = state?.sessions.find(item => item.id === state.activeSessionId) ?? state?.sessions.at(-1);
+  const context = useDraftAttachments(state?.project.workspace, session?.id);
+  const messageAttachments = useMemo(() => new Map((session?.messages ?? []).map(message => [message.id, message.attachments ?? []])), [session?.messages]);
   visibleSessionId.current = session?.id;
   const running = !!session && activeStatuses.has(session.status);
-  const ready = !!state?.runtime.connected && !!state.runtime.authenticated;
+  const agentId = session?.agentId ?? state?.defaultAgentId ?? "codex";
+  const agent = state?.agents.find(item => item.id === agentId);
+  const agentName = agent?.name ?? (agentId === "codex" ? "Codex" : "Agent");
+  const ready = !!state?.runtime.connected && !!state.runtime.authenticated && (!state.runtime.agentId || state.runtime.agentId === agentId);
   const threads = useMemo(() => [...(state?.sessions ?? [])].reverse().map(item => ({
     id: item.id, title: titleFor(item), status: "regular" as const,
   })), [state?.sessions]);
@@ -194,10 +238,14 @@ export function ChatWorkspace(props: WorkspaceProps) {
       writeDraft(session.id, text);
     }
   };
-  const sendMessage = async (text: string) => {
+  const sendMessage = async (text: string, attachments = context.attachments) => {
     const targetId = session?.id;
-    await props.onSend(text);
-    if (targetId && drafts.current.get(targetId) === text) drafts.current.delete(targetId);
+    const version = targetId ? draftVersions.current.get(targetId) : undefined;
+    if (context.blocked) throw new Error('Finish attaching context before sending.');
+    await props.onSend(text, attachments);
+    context.accepted(attachments.map(item => item.id), context.scope);
+    if (targetId && draftVersions.current.get(targetId) !== version) return;
+    if (targetId && drafts.current.get(targetId) === text) { drafts.current.delete(targetId); writeDraft(targetId, ''); }
     const composer = runtimeRef.current?.thread.composer;
     if (visibleSessionId.current === targetId && composer?.getState().text === text) composer.setText("");
   };
@@ -235,11 +283,17 @@ export function ChatWorkspace(props: WorkspaceProps) {
   runtimeRef.current = runtime;
 
   useEffect(() => {
-    runtime.thread.composer.setText(session ? drafts.current.get(session.id) ?? readDraft(session.id) : "");
+    const restored = session ? drafts.current.get(session.id) ?? readDraft(session.id) : "";
+    if (session) {
+      drafts.current.set(session.id, restored);
+      if (!draftVersions.current.has(session.id)) draftVersions.current.set(session.id, 0);
+    }
+    runtime.thread.composer.setText(restored);
     if (!session) return;
     const id = session.id;
     const persist = () => {
       const text = runtime.thread.composer.getState().text;
+      if (drafts.current.get(id) !== text) draftVersions.current.set(id, (draftVersions.current.get(id) ?? 0) + 1);
       drafts.current.set(id, text);
       writeDraft(id, text);
     };
@@ -286,7 +340,7 @@ export function ChatWorkspace(props: WorkspaceProps) {
     setSidebarOpen(false);
   };
 
-  return <AssistantRuntimeProvider runtime={runtime}>
+  return <AgentNameContext.Provider value={agentName}><MessageAttachmentsContext.Provider value={messageAttachments}><AssistantRuntimeProvider runtime={runtime}>
     <div ref={paneLayout.shellRef} style={paneLayout.style} className={`app-shell ${sidebarOpen ? "sidebar-open" : ""} ${paneLayout.resizing ? "layout-resize-active" : ""}`}>
       {paneLayout.resizing && <div className="layout-resize-shield" aria-hidden="true" />}
       {sidebarOpen && <button className="sidebar-scrim" aria-label="Close conversation history" onClick={() => setSidebarOpen(false)} />}
@@ -320,7 +374,7 @@ export function ChatWorkspace(props: WorkspaceProps) {
       <div className={`main-workspace mobile-${mobilePane}`}>
         <header className="app-header">
           <div className="header-title"><button className="icon-button sidebar-toggle" aria-label="Open conversation history" onClick={() => setSidebarOpen(true)}><Icon name="sidebar" size={19} /></button><span className="header-project">{state?.project.name ?? "canvagent"}</span><span className="header-slash">/</span><span className="header-conversation">{titleFor(session)}</span></div>
-          <div className="header-actions"><Notifications controller={props.notifications} disabled={navigationBusy} onOpen={async item => { saveDraft(); setMobilePane("chat"); await props.notifications.open(item); }} /><button className={`runtime-status ${ready ? "ready" : "not-ready"}`} onClick={() => !ready && props.onConnect()} disabled={props.connecting} title={state?.runtime.error || `Codex ${state?.runtime.version ?? "runtime"}`}><span className={`status-dot ${props.connecting ? "pulse" : ""}`} />{props.connecting ? "Connecting…" : ready ? "Codex connected" : "Connect Codex"}{!ready && <Icon name="reconnect" size={13} />}</button></div>
+          <div className="header-actions"><Notifications controller={props.notifications} disabled={navigationBusy} onOpen={async item => { saveDraft(); setMobilePane("chat"); await props.notifications.open(item); }} /></div>
         </header>
         <nav className="mobile-tabs" aria-label="Workspace view"><button className={mobilePane === "chat" ? "active" : ""} onClick={() => setMobilePane("chat")}><Icon name="chat" size={16} />Conversation</button><button className={mobilePane === "canvas" ? "active" : ""} onClick={() => setMobilePane("canvas")}><Icon name="board" size={16} />Workspace</button></nav>
         <main ref={paneLayout.splitRef} className="workspace-layout">
@@ -330,17 +384,16 @@ export function ChatWorkspace(props: WorkspaceProps) {
                 {!session?.messages.length && !running && <div className="welcome">
                   <div className="welcome-symbol"><Icon name="terminal" size={25} /></div>
                   <h1>What are we working on?</h1>
-                  <p>Bring an idea, a question, or a sketch.<br />Codex can work with you on the canvas.</p>
+                  <p>Bring an idea, a question, or a sketch.<br />{agentName} can work with you on the canvas.</p>
                   <div className="suggestions"><button onClick={() => suggest("Help me plan what to build in this workspace.")}><Icon name="spark" size={17} /><span>Plan something new<small>Turn an idea into a starting point</small></span><Icon name="arrow-right" size={15} /></button><button onClick={() => suggest("Read and inspect the shared canvas, then help me improve it.")}><Icon name="board" size={17} /><span>Explore the canvas<small>Think through what's on the board</small></span><Icon name="arrow-right" size={15} /></button></div>
                 </div>}
                 <ThreadPrimitive.Messages components={{ Message: ChatMessage }} />
-                {running && <div className="working-line" role="status"><span className="working-spinner" /><span>{session?.status === "awaiting_approval" ? "Waiting for your approval" : activeTool?.title || "Codex is working"}</span></div>}
+                {running && <div className="working-line" role="status"><span className="working-spinner" /><span>{session?.status === "awaiting_approval" ? "Waiting for your approval" : activeTool?.title || `${agentName} is working`}</span></div>}
                 {!!activities.length && <div className="activity-block"><button className="activity-toggle" aria-expanded={activityOpen} onClick={() => setActivityOpen(!activityOpen)}><Icon name="terminal" size={14} /><span>Tool activity</span><span className="activity-count">{activities.length}</span><Icon name="chevron" size={14} className={activityOpen ? "rotate" : ""} /></button>{activityOpen && <div className="activity-list">{activities.map(activity => <details className="activity-item" key={activity.id}><summary><span className={`activity-dot ${activity.status ?? ""}`} /><span>{activity.title}</span><span className="activity-state">{activity.status?.replaceAll("_", " ")}</span></summary>{activity.detail && <pre>{activity.detail}</pre>}</details>)}</div>}</div>}
                 {props.sessionContent}
                 <ThreadPrimitive.ScrollToBottom className="scroll-to-bottom" aria-label="Scroll to latest message"><Icon name="down" size={17} /></ThreadPrimitive.ScrollToBottom>
               </ThreadPrimitive.Viewport>
-              {!ready && state && <div className="connection-note"><Icon name="info" size={15} /><span>{props.connecting ? "Connecting to Codex with your existing login…" : state.runtime.error || (state.runtime.connected ? "Sign in with codex login, then reconnect." : "Select Connect Codex to retry.")}</span></div>}
-              <Composer props={{ ...props, onSend: sendMessage }} running={running} ready={ready} inputRef={inputRef} />
+              <Composer props={{ ...props, onSend: sendMessage }} running={running} ready={ready} inputRef={inputRef} context={context} setText={text => runtime.thread.composer.setText(text)} />
             </ThreadPrimitive.Root>
           </section>
           <PaneResizeHandle className="workspace-resize-handle" label="Resize chat and workspace" controls="workspace-conversation" {...paneLayout.chat} onCommit={paneLayout.commit} onDraggingChange={paneLayout.dragging} />
@@ -348,5 +401,5 @@ export function ChatWorkspace(props: WorkspaceProps) {
         </main>
       </div>
     </div>
-  </AssistantRuntimeProvider>;
+  </AssistantRuntimeProvider></MessageAttachmentsContext.Provider></AgentNameContext.Provider>;
 }

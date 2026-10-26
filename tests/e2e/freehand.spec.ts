@@ -20,9 +20,9 @@ test('agent freehand strokes render as ink, remain editable as a group, and surv
   await page.getByRole('button', { name: 'New conversation', exact: true }).click();
   await expect.poll(async () => (await state(page)).activeSessionId).not.toBe(previousSession);
   await expect(page.getByRole('heading', { name: 'What are we working on?' })).toBeVisible();
-  const connect = page.getByRole('button', { name: 'Connect Codex', exact: true });
+  const connect = page.getByRole('button', { name: 'Retry agent connection', exact: true });
   if (await connect.isVisible()) await connect.click();
-  await expect(page.getByRole('button', { name: 'Codex connected', exact: true })).toBeVisible();
+  await expect(page.getByRole('status', { name: 'Codex connected', exact: true })).toBeVisible();
   await page.getByRole('textbox', { name: 'Message Codex' }).fill('[freehand] Draw arbitrary strokes and paths.');
   await page.getByRole('button', { name: 'Send message to Codex', exact: true }).click();
   await expect(page.getByText('Freehand strokes and custom paths are on the canvas.', { exact: true })).toBeVisible();

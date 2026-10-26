@@ -221,6 +221,9 @@ fn main() {
             let external_app = app.handle().clone();
             WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                 .title("Canvagent").inner_size(1440.0, 940.0).min_inner_size(850.0, 600.0).center()
+                // The composer and canvas handle dropped images through HTML5
+                // File objects, rather than native filesystem-path events.
+                .disable_drag_drop_handler()
                 .on_navigation(move |url| {
                     if url.scheme() == "tauri" || url.host_str() == Some("tauri.localhost") {
                         browser::close_for_navigation(&navigation_app);

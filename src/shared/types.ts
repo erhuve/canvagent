@@ -1,7 +1,11 @@
 import type { AgentModel, AgentSettings, SettingsRequirements } from './settings.js';
+import type { AgentCapabilities } from './agents.js';
+import type { ContextAttachment, TurnReview } from './context.js';
 
 export type JsonObject = Record<string, any>;
 export interface Message {
+  attachments?: ContextAttachment[];
+  contextText?: string;
   id: string;
   role: 'user' | 'assistant' | 'system';
   text: string;
@@ -29,6 +33,8 @@ export interface Approval {
   params: JsonObject;
 }
 export interface Session {
+  reviews?: TurnReview[];
+  agentId?: string;
   settings?: AgentSettings;
   id: string;
   title: string;
@@ -53,6 +59,7 @@ export interface Artifact {
   createdAt: string;
 }
 export interface RuntimeState {
+  agentId?: string;
   connected: boolean;
   authenticated: boolean;
   version: string;
@@ -62,5 +69,5 @@ export interface RuntimeState {
   defaults?: Partial<AgentSettings>;
   requirements?: SettingsRequirements;
   error?: string;
-  capabilities: { steering: boolean; canvasChangeNotices: boolean; canvasTools: boolean };
+  capabilities: AgentCapabilities;
 }

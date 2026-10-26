@@ -10,6 +10,7 @@ export type CodeEditorHandle = {
   goToLine(line: number, column?: number): void;
   commandPalette(): void;
   settleEdits(): Promise<void>;
+  getSelection(): { startLine: number; endLine: number } | undefined;
 };
 
 export type CodeEditorProps = {
@@ -23,6 +24,8 @@ export type CodeEditorProps = {
   onSave(): void;
   onError(message: string): void;
   onCursorChange(position: { line: number; column: number }): void;
+  onSelectionChange?(selection: { startLine: number; endLine: number } | undefined): void;
+  onAttachSelection?(selection: { startLine: number; endLine: number } | undefined): void;
   onReady?(): void;
 };
 
@@ -44,12 +47,19 @@ export const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(function
     editor.current?.focus();
     void editor.current?.getAction(id)?.run();
   };
+  const selectedLines = () => {
+    const selection = editor.current?.getSelection();
+    if (!selection || selection.isEmpty()) return undefined;
+    // Selecting to column 1 of the next line includes only the preceding lines.
+    return { startLine: selection.startLineNumber, endLine: Math.max(selection.startLineNumber, selection.endLineNumber - (selection.endColumn === 1 ? 1 : 0)) };
+  };
   useImperativeHandle(ref, () => ({
     focus: () => editor.current?.focus(),
     find: () => action('actions.find'),
     replace: () => action('editor.action.startFindReplaceAction'),
     commandPalette: () => action('editor.action.quickCommand'),
     settleEdits: () => comments.current?.whenIdle() ?? Promise.resolve(),
+    getSelection: selectedLines,
     goToLine: (line, column = 1) => {
       const instance = editor.current;
       const model = instance?.getModel();
@@ -83,10 +93,19 @@ export const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(function
       if (!applying.current) latest.current.onChange(instance.getValue());
     });
     const cursor = instance.onDidChangeCursorPosition(event => latest.current.onCursorChange({ line: event.position.lineNumber, column: event.position.column }));
+    const selection = instance.onDidChangeCursorSelection(() => latest.current.onSelectionChange?.(selectedLines()));
     instance.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => latest.current.onSave());
+    const attachAction = instance.addAction({
+      id: 'canvagent.attachSelection', label: 'Add selection to chat',
+      keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyA],
+      contextMenuGroupId: 'navigation', contextMenuOrder: 1.5,
+      run: () => { if (!latest.current.readOnly) latest.current.onAttachSelection?.(selectedLines()); },
+    });
     return () => {
       changed.dispose();
       cursor.dispose();
+      selection.dispose();
+      attachAction.dispose();
       comments.current?.dispose();
       comments.current = undefined;
       vimAdapter.current?.dispose();

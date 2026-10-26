@@ -139,6 +139,33 @@ test("steering targets the existing turn and interruption waits for its terminal
   assert.equal(runtime.activeTurnId, null);
 });
 
+test('Codex submits native image inputs on new and steered turns, including image-only prompts', async t => {
+  const images = [{ url: 'data:image/png;base64,aGVsbG8=', mimeType: 'image/png', name: 'Screenshot.png' }];
+  for (const text of ['Inspect this screenshot', '']) {
+    const { runtime, events } = fixture();
+    t.after(() => runtime.close());
+    assert.equal((await runtime.connect()).capabilities?.imageInput, true);
+    await runtime.open();
+    const turnId = await runtime.start(text, 'image-message', images);
+    const input = [...(text ? [{ type: 'text', text, text_elements: [] }] : []), { type: 'image', url: images[0].url }];
+    assert.deepEqual((await waitFor(events, 'test/start-params')).payload.input, input);
+    await runtime.steer(text, turnId, images);
+    assert.deepEqual((await waitFor(events, 'test/steer-params')).payload.input, input);
+  }
+});
+
+test('Codex rejects malformed image input before sending a native turn', async t => {
+  const { runtime, events } = fixture();
+  t.after(() => runtime.close());
+  await runtime.connect(); await runtime.open();
+  const malformed = [{ url: 'data:image/png;base64,private-image-invalid', mimeType: 'image/png' }];
+  await assert.rejects(runtime.start('Inspect', 'invalid-image', malformed), error => error instanceof Error && /attached image is invalid/.test(error.message) && !error.message.includes('private-image'));
+  assert.equal(runtime.activeTurnId, null);
+  assert.equal(events.some(event => event.type === 'test/start-params' || event.type === 'turn/started'), false);
+  await runtime.start('Valid text still works');
+  await waitFor(events, 'test/start-params');
+});
+
 test('resuming an existing thread installs current canvas MCP tools without replacing native history', async t => {
   const { runtime, events } = fixture({ canvasMcp: { url: () => 'http://127.0.0.1:4317/mcp/saved-conversation', token: 'local-test-token' } });
   t.after(() => runtime.close());
