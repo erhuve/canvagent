@@ -1,0 +1,11 @@
+# Files panel
+
+Use **New file** or **New folder** above the file tree. Select a folder to create inside it, or a file to create a sibling. The name dialog shows the destination folder. New files open in the editor immediately; new folders expand in the tree.
+
+Right-click a file, folder, or blank area to open Canvagent's file menu. The **…** action beside each row offers the same controls on touch devices. Keyboard users can focus a row and press Shift+F10 or the context-menu key, navigate with arrows/Home/End, and close with Escape. File and folder menus include **Rename**, **Copy relative path**, and **Delete**.
+
+Renaming updates open descendant tabs and their future save paths. If affected files have unsaved edits, **Save and rename** saves them with the usual disk-conflict checks, then asks you to confirm the rename. **Save and delete** follows the same sequence. Canceling or a failed save preserves the editor drafts. The app blocks project navigation while a file operation is pending.
+
+Delete requires confirmation and moves the item, including folder contents, into Canvagent's private recovery storage. It does not use the operating system's Trash. **Undo delete** restores the item and reopens previously open files. A newer item at the original path blocks undo without replacing that item or discarding the saved recovery copy. Recovery bytes and their manifests survive app restarts in the project's saved-data directory under `file-trash`; the immediate Undo control belongs to the current Files panel. There is no recovery-history browser or automatic purge yet.
+
+File management stays inside the selected workspace. Existing destination names, stale file/folder revisions, Git internals, symbolic-link management paths, and application-data folders are rejected. A directory snapshot is bounded to 2,000 descendants, 64 MiB of file bytes, and five seconds; larger items need a system file manager. Moving an item across filesystems is rejected while preserving the original. Regular-file moves reserve their destination exclusively. Directory moves recheck revisions, locations, and destination absence immediately before the operating-system rename; the local filesystem remains shared with external editors and processes.

@@ -122,6 +122,42 @@ test('closing the native control pipe stops its backend instead of leaving an or
   await assert.rejects(fetch(`${backend.url}/api/state`, { signal: AbortSignal.timeout(1500) }));
 });
 
+test('packaged file creation, folder rename, and deletion undo survive a desktop restart', async t => {
+  const root = directory(t);
+  const first = await start(t, root);
+  const bootstrap = await fetch(`${first.url}/api/state`);
+  const cookie = bootstrap.headers.get('set-cookie')!.split(';')[0];
+  const request = async (backend: { url: string }, credential: string, path: string, body?: unknown) => {
+    const response = await fetch(`${backend.url}/api/files/${path}`, {
+      method: body === undefined ? 'GET' : 'POST',
+      headers: { cookie: credential, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+    const result = await response.json() as any;
+    assert.ok(response.ok, JSON.stringify(result));
+    return result;
+  };
+  await request(first, cookie, 'create', { path: 'created', kind: 'directory' });
+  await request(first, cookie, 'create', { path: 'created/note.md', kind: 'file' });
+  const blank = await request(first, cookie, 'content?path=created/note.md');
+  await request(first, cookie, 'content', { path: 'created/note.md', content: '# Saved in the packaged app\n', revision: blank.revision });
+  const folder = await request(first, cookie, 'info?path=created');
+  await request(first, cookie, 'rename', { path: 'created', newPath: 'renamed', revision: folder.revision });
+  const note = await request(first, cookie, 'info?path=renamed/note.md');
+  const deleted = await request(first, cookie, 'delete', { path: 'renamed/note.md', revision: note.revision });
+  assert.equal(deleted.trashed, true);
+  first.child.stdin.write('shutdown\n');
+  assert.equal((await first.exited)[0], 0);
+  const second = await start(t, root);
+  const reopened = await fetch(`${second.url}/api/state`);
+  const reopenedCookie = reopened.headers.get('set-cookie')!.split(';')[0];
+  await request(second, reopenedCookie, 'restore', { trashId: deleted.trashId });
+  const restored = await request(second, reopenedCookie, 'content?path=renamed/note.md');
+  assert.equal(restored.content, '# Saved in the packaged app\n');
+  second.child.stdin.write('shutdown\n');
+  assert.equal((await second.exited)[0], 0);
+});
+
 test('the bundled PTY opens an interactive project shell outside the source checkout', async t => {
   const root = directory(t);
   const backend = await start(t, root, { SHELL: '/bin/sh' });

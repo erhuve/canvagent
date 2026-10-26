@@ -60,7 +60,7 @@ flowchart TB
 | --- | --- |
 | React interface | Conversation presentation, input, tool activity, approval prompts, connection and save state. |
 | Workspace dock | Canvas, browser, and file tabs beside chat. File buffers stay open across tab switches and guard project navigation when unsaved. |
-| Project files | Directory listing, bounded UTF-8 reads, revision-checked atomic saves, and safe raw previews, all rooted at the selected workspace. |
+| Project files | Directory listing, bounded UTF-8 reads, revision-checked atomic saves, exclusive creation, guarded rename, recovery-backed deletion/undo, and safe raw previews, rooted at the selected workspace. |
 | Desktop browser | A native child webview with URL/history controls and panel bounds. Only the main app webview receives desktop command capabilities. |
 | Excalidraw adapter | Native editor integration, selection, optimistic drawing, conversion to object patches, and rendering accepted board changes. |
 | Session controller | Project/session association, turn lifecycle, explicit user instructions, event routing, and pending approval correlation. |

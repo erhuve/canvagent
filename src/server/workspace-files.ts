@@ -1,8 +1,8 @@
 import express from 'express';
 import { createHash, randomUUID } from 'node:crypto';
 import { constants, type Stats } from 'node:fs';
-import { access, open, opendir, realpath, rename, stat, unlink, type FileHandle } from 'node:fs/promises';
-import { basename, dirname, extname, isAbsolute, join, relative, resolve, win32 } from 'node:path';
+import { access, link, lstat, mkdir, open, opendir, readlink, realpath, rename, rmdir, stat, unlink, type FileHandle } from 'node:fs/promises';
+import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep, win32 } from 'node:path';
 import { Worker } from 'node:worker_threads';
 import { z } from 'zod';
 
@@ -12,6 +12,12 @@ export const MAX_INDEX_RESULTS = 200;
 export const MAX_SEARCH_RESULTS = 500;
 export const MAX_DISCOVERY_ENTRIES = 20_000;
 export const SEARCH_DEADLINE_MS = 5000;
+export const MAX_MANAGEMENT_ENTRIES = 2000;
+export const MAX_MANAGEMENT_BYTES = 64 * 1024 * 1024;
+export const MANAGEMENT_DEADLINE_MS = 5000;
+type ManagementInfo = { path: string; name: string; kind: 'file' | 'directory'; revision: string; size: number; entries: number };
+type WorkspaceFileOptions = { trashDirectory?: string; protectedDirectory?: string };
+const trashManifest = z.object({ path: z.string(), kind: z.enum(['file', 'directory']), revision: z.string().regex(/^[a-f0-9]{64}$/), createdAt: z.string() });
 type IndexedFile = { path: string; name: string };
 type SearchMatch = { path: string; line: number; column: number; text: string };
 type FileSearchOptions = { query: string; caseSensitive?: boolean; regex?: boolean; wholeWord?: boolean };
@@ -19,6 +25,10 @@ const searchOptions = z.object({ query: z.string().min(1).max(1000), caseSensiti
 type FileEntry = { name: string; path: string; kind: 'directory' | 'file'; size?: number };
 const digest = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
 const failure = (message: string, status = 400) => Object.assign(new Error(message), { status });
+const isOutside = (root: string, target: string) => {
+  const path = relative(root, target);
+  return path === '..' || path.startsWith(`..${sep}`) || isAbsolute(path);
+};
 const unchanged = (before: Stats, after: Stats) => before.dev === after.dev && before.ino === after.ino
   && before.size === after.size && before.mtimeMs === after.mtimeMs && before.ctimeMs === after.ctimeMs;
 
@@ -192,10 +202,17 @@ function discover<T extends { truncated: boolean }>(root: string, mode: 'index' 
 /** Files remain rooted at the canonical project folder, including symlink targets. */
 export class WorkspaceFiles {
   private writes = new Map<string, Promise<void>>();
-  constructor(private workspace: string) {}
+  private mutationTail = Promise.resolve();
+  constructor(private workspace: string, private options: WorkspaceFileOptions = {}) {}
+
+  private async mutate<T>(job: () => Promise<T>): Promise<T> {
+    const result = this.mutationTail.then(job);
+    this.mutationTail = result.then(() => {}, () => {});
+    return result;
+  }
 
   private path(value: unknown, allowRoot = false) {
-    if (typeof value !== 'string' || value.length > 4096 || value.includes('\0') || value.includes('\\') || isAbsolute(value) || win32.isAbsolute(value)) throw failure('Use a workspace-relative file path.');
+    if (typeof value !== 'string' || value.length > 4096 || value.includes('\0') || value.includes('\\') || isAbsolute(value) || win32.parse(value).root || (process.platform === 'win32' && value.includes(':'))) throw failure('Use a workspace-relative file path.');
     const segments = value.split('/');
     if (segments.some(segment => segment === '..')) throw failure('Parent paths are not allowed.');
     if (segments.some(segment => segment.toLowerCase() === '.git')) throw failure('Git internal files are not available in the file browser.', 403);
@@ -207,8 +224,7 @@ export class WorkspaceFiles {
     let target: string;
     try { target = await realpath(resolve(this.workspace, path)); }
     catch (error) { throw this.fileError(error); }
-    const rel = relative(this.workspace, target);
-    if (rel === '..' || rel.startsWith('../') || isAbsolute(rel)) throw failure('This path points outside the workspace.', 403);
+    if (isOutside(this.workspace, target)) throw failure('This path points outside the workspace.', 403);
     if (target.split(/[\\/]/).some(segment => segment.toLowerCase() === '.git')) throw failure('Git internal files are not available in the file browser.', 403);
     return target;
   }
@@ -216,7 +232,219 @@ export class WorkspaceFiles {
     const code = (error as NodeJS.ErrnoException).code;
     if (['ENOENT', 'ENOTDIR'].includes(code ?? '')) return failure('File or folder not found.', 404);
     if (['EACCES', 'EPERM', 'ELOOP'].includes(code ?? '')) return failure('This file or folder is not accessible.', 403);
+    if (['EEXIST', 'ENOTEMPTY'].includes(code ?? '')) return failure('A file or folder already exists at that path.', 409);
+    if (code === 'EXDEV') return failure('This operation cannot move files between different drives. The original item has been preserved.', 409);
     return error;
+  }
+  private async managedPath(path: string, parentOnly = false) {
+    const root = await realpath(this.workspace);
+    const absolute = resolve(root, path);
+    const checked = parentOnly ? dirname(absolute) : absolute;
+    let canonical: string;
+    try { canonical = await realpath(checked); } catch (error) { throw this.fileError(error); }
+    if (isOutside(root, canonical)) throw failure('This path points outside the workspace.', 403);
+    if (canonical.split(/[\\/]/).some(segment => segment.toLowerCase() === '.git')) throw failure('Git internal files are not available in the file browser.', 403);
+    // Reading a linked file is useful, but renaming or deleting through a link
+    // is surprising. Management operations always address the visible item.
+    if (canonical !== checked) throw failure('File management through symbolic links is not supported.', 403);
+    for (const protectedPath of [this.options.protectedDirectory, this.options.trashDirectory].filter((value): value is string => Boolean(value))) {
+      const protectedDirectory = resolve(protectedPath);
+      if (!isOutside(protectedDirectory, absolute) || (!parentOnly && !isOutside(absolute, protectedDirectory))) throw failure('Application data and recovery storage cannot be changed from the file browser.', 403);
+    }
+    return absolute;
+  }
+  private async snapshot(absolute: string) {
+    const hash = createHash('sha256');
+    const deadline = Date.now() + MANAGEMENT_DEADLINE_MS;
+    let entries = 0, size = 0;
+    let rootKind: 'file' | 'directory' = 'file';
+    const check = () => {
+      if (entries > MAX_MANAGEMENT_ENTRIES || size > MAX_MANAGEMENT_BYTES || Date.now() > deadline) throw failure('This item is too large to safely manage here. Use your system file manager instead.', 413);
+    };
+    const visit = async (file: string, path: string): Promise<void> => {
+      check();
+      const before = await lstat(file);
+      const kind = before.isSymbolicLink() ? 'link' : before.isDirectory() ? 'directory' : before.isFile() ? 'file' : 'unsupported';
+      if (!path) {
+        if (kind !== 'file' && kind !== 'directory') throw failure('Choose a regular file or folder. Symbolic links cannot be managed here.', 403);
+        rootKind = kind;
+      }
+      if (kind === 'unsupported') throw failure('This folder contains a special filesystem item. Use your system file manager instead.', 403);
+      // Renaming changes the root inode's ctime, so keep that one field out of
+      // the reusable revision. Content, identity, mode and mtime remain guarded.
+      hash.update(JSON.stringify([path, kind, before.dev, before.ino, before.mode, before.size, before.mtimeMs, path ? before.ctimeMs : null]));
+      if (kind === 'file') {
+        size += before.size; check();
+        const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+        try {
+          if (!unchanged(before, await handle.stat())) throw failure('This item changed on disk. Refresh it and try again.', 409);
+          const buffer = Buffer.alloc(256 * 1024);
+          let offset = 0;
+          while (offset <= before.size) {
+            check();
+            const result = await handle.read(buffer, 0, Math.min(buffer.length, before.size - offset + 1), offset);
+            if (!result.bytesRead) break;
+            offset += result.bytesRead;
+            if (offset > before.size) throw failure('This item changed on disk. Refresh it and try again.', 409);
+            hash.update(buffer.subarray(0, result.bytesRead));
+          }
+          if (offset !== before.size || !unchanged(before, await handle.stat())) throw failure('This item changed on disk. Refresh it and try again.', 409);
+        } finally { await handle.close(); }
+      } else if (kind === 'link') {
+        hash.update(await readlink(file));
+      } else {
+        if (await realpath(file) !== file) throw failure('The item location changed. Refresh it and try again.', 409);
+        const names: string[] = [];
+        const directory = await opendir(file);
+        for await (const entry of directory) {
+          entries++; check();
+          if (entry.name.toLowerCase() === '.git') throw failure('Folders containing Git internal files cannot be moved or removed here.', 403);
+          names.push(entry.name);
+        }
+        for (const name of names.sort()) await visit(join(file, name), path ? `${path}/${name}` : name);
+      }
+      if (!unchanged(before, await lstat(file))) throw failure('This item changed on disk. Refresh it and try again.', 409);
+    };
+    try { await visit(absolute, ''); }
+    catch (error) { throw this.fileError(error); }
+    return { kind: rootKind, revision: hash.digest('hex'), size, entries };
+  }
+  async info(input: unknown): Promise<ManagementInfo> {
+    const path = this.path(input);
+    return { path, name: basename(path), ...await this.snapshot(await this.managedPath(path)) };
+  }
+  private async expected(path: string, revision: string) {
+    if (!/^[a-f0-9]{64}$/.test(revision)) throw failure('A valid saved item revision is required.');
+    const absolute = await this.managedPath(path);
+    const info = await this.snapshot(absolute);
+    if (info.revision !== revision) throw failure('This item changed on disk. Refresh it and try again.', 409);
+    return { absolute, ...info };
+  }
+  private async vacant(absolute: string) {
+    try { await lstat(absolute); } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+      throw this.fileError(error);
+    }
+    throw failure('A file or folder already exists at that path.', 409);
+  }
+  private async moveVacant(source: string, target: string, revision: string, checkLocations: () => Promise<void>) {
+    const original = await lstat(source);
+    const sameIdentity = (info: Stats) => info.dev === original.dev && info.ino === original.ino && info.isFile();
+    await checkLocations();
+    if (!original.isFile()) {
+      if (!original.isDirectory()) throw failure('This item changed on disk. Refresh it and try again.', 409);
+      if ((await this.snapshot(source)).revision !== revision) throw failure('This item changed on disk. Refresh it and try again.', 409);
+      await checkLocations();
+      await this.vacant(target);
+      await rename(source, target);
+      return;
+    }
+    // link() is an atomic no-clobber operation for regular files. Keep the old
+    // name until both links still refer to the exact, reviewed file contents.
+    let linked = false;
+    try {
+      await link(source, target); linked = true;
+      if (!sameIdentity(await lstat(target)) || !sameIdentity(await lstat(source))) throw failure('This item changed on disk. Refresh it and try again.', 409);
+      await checkLocations();
+      if ((await this.snapshot(source)).revision !== revision || (await this.snapshot(target)).revision !== revision) throw failure('This item changed on disk. Refresh it and try again.', 409);
+      if (!sameIdentity(await lstat(source)) || !sameIdentity(await lstat(target))) throw failure('This item changed on disk. Refresh it and try again.', 409);
+      await unlink(source);
+      linked = false;
+    } finally {
+      if (linked) {
+        try { if (sameIdentity(await lstat(target))) await unlink(target); } catch { /* Preserve a replaced destination. */ }
+      }
+    }
+  }
+  async create(input: unknown, kind: 'file' | 'directory') {
+    const path = this.path(input);
+    if (kind !== 'file' && kind !== 'directory') throw failure('Choose a file or folder.');
+    return this.mutate(async () => {
+      const absolute = await this.managedPath(path, true);
+      try {
+        if (kind === 'directory') await mkdir(absolute);
+        else { const handle = await open(absolute, 'wx'); await handle.close(); }
+        return { path, kind };
+      } catch (error) { throw this.fileError(error); }
+    });
+  }
+  async move(input: unknown, destination: unknown, revision: string) {
+    const path = this.path(input), newPath = this.path(destination);
+    if (newPath.startsWith(`${path}/`)) throw failure('A folder cannot be moved inside itself.');
+    return this.mutate(async () => {
+      const source = await this.expected(path, revision);
+      if (path === newPath) return { path, previousPath: path, kind: source.kind };
+      const target = await this.managedPath(newPath, true);
+      await this.vacant(target);
+      try {
+        // Mutations from this app are serialized. Recheck immediately before
+        // rename so ordinary external changes never replace a known item.
+        await this.moveVacant(source.absolute, target, revision, async () => {
+          if (await this.managedPath(path) !== source.absolute || await this.managedPath(newPath, true) !== target) throw failure('The item location changed. Refresh it and try again.', 409);
+        });
+        return { path: newPath, previousPath: path, kind: source.kind };
+      } catch (error) { throw this.fileError(error); }
+    });
+  }
+  private async recoveryDirectory() {
+    if (!this.options.trashDirectory) throw failure('Recovery storage is not configured for this workspace.', 503);
+    try {
+      await mkdir(this.options.trashDirectory, { recursive: true, mode: 0o700 });
+      if ((await lstat(this.options.trashDirectory)).isSymbolicLink()) throw failure('Recovery storage must be a regular folder.', 403);
+      return await realpath(this.options.trashDirectory);
+    } catch (error) { throw this.fileError(error); }
+  }
+  async remove(input: unknown, revision: string) {
+    const path = this.path(input);
+    return this.mutate(async () => {
+      const source = await this.expected(path, revision);
+      const trash = await this.recoveryDirectory();
+      const trashId = randomUUID(), directory = join(trash, trashId);
+      await mkdir(directory, { mode: 0o700 });
+      const manifestPath = join(directory, 'manifest.json');
+      let moved = false;
+      try {
+        const manifest = await open(manifestPath, 'wx', 0o600);
+        try { await manifest.writeFile(JSON.stringify({ path, kind: source.kind, revision, createdAt: new Date().toISOString() })); await manifest.sync(); }
+        finally { await manifest.close(); }
+        if ((await this.expected(path, revision)).absolute !== source.absolute) throw failure('The item location changed. Refresh it and try again.', 409);
+        await rename(source.absolute, join(directory, 'item'));
+        moved = true;
+        return { path, deleted: true as const, trashed: true as const, trashId };
+      } catch (error) { throw this.fileError(error); }
+      finally {
+        if (!moved) { await unlink(manifestPath).catch(() => {}); await rmdir(directory).catch(() => {}); }
+      }
+    });
+  }
+  async restore(trashId: string) {
+    if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(trashId)) throw failure('Choose a valid recovery item.');
+    return this.mutate(async () => {
+      const trash = await this.recoveryDirectory();
+      const directory = join(trash, trashId);
+      try {
+        if ((await realpath(directory)) !== directory) throw failure('Recovery items cannot be symbolic links.', 403);
+        const handle = await open(join(directory, 'manifest.json'), constants.O_RDONLY | constants.O_NOFOLLOW);
+        let manifest: z.infer<typeof trashManifest>;
+        try {
+          const info = await handle.stat();
+          if (!info.isFile() || info.size > 16 * 1024) throw failure('This recovery item is invalid.', 409);
+          manifest = trashManifest.parse(JSON.parse(await handle.readFile('utf8')));
+        } finally { await handle.close(); }
+        const path = this.path(manifest.path);
+        const target = await this.managedPath(path, true);
+        await this.vacant(target);
+        const source = join(directory, 'item');
+        const snapshot = await this.snapshot(source);
+        if (snapshot.revision !== manifest.revision || snapshot.kind !== manifest.kind) throw failure('This recovery item changed on disk. It has been preserved in recovery storage.', 409);
+        await this.moveVacant(source, target, manifest.revision, async () => {
+          if (await realpath(directory) !== directory || await this.managedPath(path, true) !== target) throw failure('The item location changed. Refresh it and try again.', 409);
+        });
+        await unlink(join(directory, 'manifest.json')).catch(() => {});
+        await rmdir(directory).catch(() => {});
+        return { path, kind: manifest.kind };
+      } catch (error) { throw this.fileError(error); }
+    });
   }
   private async opened(path: string) {
     const target = await this.target(path);
@@ -280,6 +508,9 @@ export class WorkspaceFiles {
     return discover(await this.target(''), 'search', searchOptions.parse(input), { matches: [] as SearchMatch[], truncated: false }, signal);
   }
   async write(input: unknown, content: string, revision: string) {
+    return this.mutate(() => this.writeContent(input, content, revision));
+  }
+  private async writeContent(input: unknown, content: string, revision: string) {
     const path = this.path(input);
     const bytes = Buffer.from(content, 'utf8');
     if (text(bytes) !== content) throw failure('The new content must be valid UTF-8 text.', 415);
@@ -329,8 +560,8 @@ export class WorkspaceFiles {
   }
 }
 
-export function createWorkspaceFileRouter(workspace: string) {
-  const files = new WorkspaceFiles(workspace);
+export function createWorkspaceFileRouter(workspace: string, options: WorkspaceFileOptions = {}) {
+  const files = new WorkspaceFiles(workspace, options);
   const router = express.Router();
   const discoveryResponse = async (res: express.Response, job: (signal: AbortSignal) => Promise<unknown>) => {
     const controller = new AbortController();
@@ -346,6 +577,23 @@ export function createWorkspaceFileRouter(workspace: string) {
     await discoveryResponse(res, signal => files.search({ query: input.query, caseSensitive: input.caseSensitive === 'true', regex: input.regex === 'true', wholeWord: input.wholeWord === 'true' }, signal));
   });
   router.get('/content', async (req, res) => res.json(await files.read(req.query.path)));
+  router.get('/info', async (req, res) => res.json(await files.info(req.query.path)));
+  router.post('/create', async (req, res) => {
+    const input = z.object({ path: z.string(), kind: z.enum(['file', 'directory']) }).strict().parse(req.body);
+    res.json(await files.create(input.path, input.kind));
+  });
+  router.post('/rename', async (req, res) => {
+    const input = z.object({ path: z.string(), newPath: z.string(), revision: z.string() }).strict().parse(req.body);
+    res.json(await files.move(input.path, input.newPath, input.revision));
+  });
+  router.post('/delete', async (req, res) => {
+    const input = z.object({ path: z.string(), revision: z.string() }).strict().parse(req.body);
+    res.json(await files.remove(input.path, input.revision));
+  });
+  router.post('/restore', async (req, res) => {
+    const input = z.object({ trashId: z.string() }).strict().parse(req.body);
+    res.json(await files.restore(input.trashId));
+  });
   router.post('/content', async (req, res) => {
     const input = z.object({ path: z.string(), content: z.string(), revision: z.string() }).parse(req.body);
     res.json(await files.write(input.path, input.content, input.revision));

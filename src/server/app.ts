@@ -595,7 +595,7 @@ export function createApplication(options: ApplicationOptions) {
     next();
   });
   app.use(express.json({ limit: '30mb' }));
-  app.use('/api/files', createWorkspaceFileRouter(workspace));
+  app.use('/api/files', createWorkspaceFileRouter(workspace, { trashDirectory: join(options.dataDir, 'file-trash'), protectedDirectory: options.dataDir }));
   app.post('/api/context/attachments', async (req, res) => {
     const { reference } = z.object({ reference: contextReferenceSchema }).strict().parse(req.body);
     res.json(await contextAttachments.add(reference));

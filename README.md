@@ -44,6 +44,8 @@ The [Zed source review](docs/zed-research.md) covers ACP architecture and a broa
 
 Chat supports **@mentions**, visible context chips, and **pasted or dropped images**, including image-only messages. Attach files or selected lines from the editor, canvas objects, conversations, and artifacts, then inspect the exact context before sending. **Review changes** in the conversation shows saved before/after file diffs and affected canvas objects, with guarded file restoration. See [context, image, and review behavior](docs/context-and-review.md).
 
+The **Files** panel creates files and folders, opens new files for editing, and provides a right-click menu for renaming, copying relative paths, and deleting with recovery/undo. Unsaved buffers and newer disk edits are protected. See [file management](docs/file-management.md).
+
 ## Desktop app (Tauri)
 
 The desktop app opens with a native workspace folder picker and runs the same chat, Excalidraw editor, and Codex backend in a Tauri window. It bundles a standalone Node 24 runtime; installed-app users need their chosen harness and login, or model API credentials, and do not need to install Node separately.

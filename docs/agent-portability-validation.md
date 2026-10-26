@@ -5,11 +5,11 @@ Validated on macOS Apple Silicon, 26 October 2026. The changes follow the [Zed s
 | Check | Result |
 | --- | --- |
 | TypeScript and production browser build | Passed |
-| Unit/integration suite | 225 passed; 1 platform skip for an invalid UTF-8 filename unsupported by this filesystem. After the final diff truncation-notice fix, all 22 focused review/queue checks passed |
-| Browser suite in installed Google Chrome | All 98 passed in the full run; all 23 chat/context/editor/review checks passed again after message admission fixes |
-| Desktop prepared-resource suite | 5 passed, including serving/persistence, parent shutdown, real PTY, unavailable PTY recovery, and windowless macOS WebKit |
-| Refreshed packaged sidecar | 4 sidecar checks passed after final configuration fixes |
-| Final macOS application bundle | Release build and ad hoc signature verification passed; all 4 sidecar checks passed against the signed bundle’s actual Node binary and packaged resources |
+| Unit/integration suite | 236 passed; 1 platform skip for an invalid UTF-8 filename unsupported by this filesystem |
+| Browser suite in installed Google Chrome | All 109 passed in the final full run, including all 11 file-management checks |
+| Desktop prepared-resource suite | 6 passed, including serving/persistence, file-management recovery across restart, parent shutdown, real PTY, unavailable PTY recovery, and windowless macOS WebKit |
+| Refreshed packaged sidecar | 5 sidecar checks passed, including the file-management restart workflow |
+| Final macOS application bundle | Release build and ad hoc signature verification passed; all 5 sidecar checks passed against the signed bundle’s actual Node binary and packaged resources |
 | Installed Codex compatibility | Passed against Codex Desktop 0.163.0-alpha.10.2: same native thread/context, current five canvas tools, freehand schema and authenticated MCP tool call |
 | Whitespace/diff checks | Passed |
 
@@ -20,6 +20,8 @@ Browser checks cover the picker and manager, drafts/history, queued non-steering
 Context checks cover frozen file/range, folder, conversation, canvas, and artifact snapshots; workspace image mentions; raster validation and integrity; project isolation; image-only sends and steering; queued image retention; unsupported image preflight; and native Codex, negotiated ACP, OpenAI-compatible, and Anthropic image payloads. Browser checks exercise `@mentions`, chip previews/removal, clipboard paste, drop, reload, send failures, late hydration/upload results, retained background drafts, selected-line save/attach, disk conflicts, and conversation switching during save.
 
 Review checks cover immutable before/after diffs, observed canvas changes, incomplete scan coverage, unusual legal filenames, symlink/Git-internal rejection, binary limitations, corrupt snapshots, bounded diff notices, and guarded restoration of added/modified/deleted text. Deleted-file restoration preserves private/executable permission bits, with private access for legacy snapshots. Integration checks cover receipt deduplication while image capabilities connect, queued-message ordering during review completion, delayed start acknowledgments, late steering rejection, and shutdown during baseline capture.
+
+File-management checks cover empty file/folder creation, nested destinations, duplicate/invalid names, binary and folder rename, stale subtree rejection, concurrent creation, symlink/Git/application-data protection, project cookie/origin isolation, durable recovery manifests, restore after restart, and refusal to replace a newer file during Undo. Browser checks exercise mouse/keyboard context menus, clipboard paths, F2/Delete shortcuts, immediate editing/saving of new files, dirty-buffer confirmation, descendant tab/path remapping, recovery Undo, and transient reopen failures. The initial focused run caught a background-tab loading regression; it was fixed before the final full suite. Three test timing/instrumentation errors were also corrected. The rendered context menu and creation controls were visually inspected.
 
 No paid model inference is used by these checks. Claude Code, OpenCode, and Gemini executables were not installed in this environment. Their live authenticated inference, including understanding pasted images, and real paid API inference remain unverified. The native Codex compatibility check uses a local inference stub and a disposable archived conversation; it proves protocol/history/tool compatibility rather than model-driven canvas reasoning. Codex image inputs match the locally generated native app-server schema; ACP image input is advertised only after capability negotiation.
 
