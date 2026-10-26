@@ -1,5 +1,5 @@
 import { readFile } from 'node:fs/promises';
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Locator, type Page } from '@playwright/test';
 
 const preview = 'https://canvas-preview.test/';
 
@@ -61,6 +61,40 @@ async function addWebsite(page: Page) {
   return { iframe, frame };
 }
 
+async function websiteButtonPoint(page: Page, iframe: Locator, button: Locator, surface: 'iframe' | 'canvas') {
+  await expect(button).toBeVisible();
+  const local = await button.evaluate(element => {
+    const bounds = element.getBoundingClientRect();
+    const x = bounds.x + bounds.width / 2, y = bounds.y + bounds.height / 2;
+    const document = element.ownerDocument;
+    const viewport = document.defaultView!;
+    const hit = document.elementFromPoint(x, y);
+    return { x, y, width: viewport.innerWidth, height: viewport.innerHeight, hit: hit === element || element.contains(hit) };
+  });
+  expect(local.hit).toBe(true);
+  expect(local.x).toBeGreaterThan(0);
+  expect(local.x).toBeLessThan(local.width);
+  expect(local.y).toBeGreaterThan(0);
+  expect(local.y).toBeLessThan(local.height);
+  const displayed = await iframe.boundingBox();
+  expect(displayed).not.toBeNull();
+  // Playwright's Chromium geometry for out-of-process frames can omit the
+  // enclosing CSS scale. Map the frame viewport to its displayed dimensions,
+  // then use a real mouse event to keep exercising Browse/Draw input routing.
+  const point = { x: displayed!.x + local.x * displayed!.width / local.width, y: displayed!.y + local.y * displayed!.height / local.height };
+  const viewport = await page.evaluate(() => ({ width: innerWidth, height: innerHeight }));
+  expect(point.x).toBeGreaterThan(0);
+  expect(point.x).toBeLessThan(viewport.width);
+  expect(point.y).toBeGreaterThan(0);
+  expect(point.y).toBeLessThan(viewport.height);
+  if (surface === 'iframe') {
+    expect(await iframe.evaluate((element, { x, y }) => element.ownerDocument.elementFromPoint(x, y) === element, point)).toBe(true);
+  } else {
+    expect(await page.evaluate(({ x, y }) => document.elementFromPoint(x, y)?.matches('canvas.interactive'), point)).toBe(true);
+  }
+  return point;
+}
+
 async function drawAcrossWebsite(page: Page) {
   const iframe = (await page.locator('iframe[title="Canvas website"]').boundingBox())!;
   await page.getByRole('radio', { name: 'Draw', exact: true }).check();
@@ -110,7 +144,7 @@ test('a live website accepts input in Browse and saved Excalidraw ink overlays i
   const errors: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
   await openEmptyCanvas(page);
-  const { frame } = await addWebsite(page);
+  const { iframe, frame } = await addWebsite(page);
   const added = (await state(page)).board.elements.find((element: any) => !element.isDeleted && element.type === 'embeddable');
   expect(added.link).toBe(preview);
   expect(added.customData.canvagent).toMatchObject({ kind: 'browser', version: 1 });
@@ -126,14 +160,14 @@ test('a live website accepts input in Browse and saved Excalidraw ink overlays i
 
   await page.getByRole('button', { name: 'Browse website', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Browse website', exact: true })).toHaveAttribute('aria-pressed', 'true');
-  await frame.getByRole('button', { name: 'Website clicks: 0', exact: true }).click();
+  const browsePoint = await websiteButtonPoint(page, iframe, frame.getByRole('button', { name: 'Website clicks: 0', exact: true }), 'iframe');
+  await page.mouse.click(browsePoint.x, browsePoint.y);
   await expect(frame.getByRole('button', { name: 'Website clicks: 1', exact: true })).toBeVisible();
 
   await page.getByRole('button', { name: 'Draw on canvas', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Draw on canvas', exact: true })).toHaveAttribute('aria-pressed', 'true');
-  const button = (await frame.getByRole('button', { name: 'Website clicks: 1', exact: true }).boundingBox())!;
-  expect(await page.evaluate(({ x, y }) => document.elementFromPoint(x, y)?.matches('canvas.interactive'), { x: button.x + button.width / 2, y: button.y + button.height / 2 })).toBe(true);
-  await page.mouse.click(button.x + button.width / 2, button.y + button.height / 2);
+  const drawPoint = await websiteButtonPoint(page, iframe, frame.getByRole('button', { name: 'Website clicks: 1', exact: true }), 'canvas');
+  await page.mouse.click(drawPoint.x, drawPoint.y);
   await expect(frame.getByRole('button', { name: 'Website clicks: 1', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Draw on canvas', exact: true })).toHaveAttribute('aria-pressed', 'true');
   expect(await darkPixels(page, clip)).toBeGreaterThan(60);
@@ -180,7 +214,8 @@ test('the live website follows canvas zoom and pan without changing its saved fr
   expect({ x: after.x, y: after.y, width: after.width, height: after.height }).toEqual({ x: saved.x, y: saved.y, width: saved.width, height: saved.height });
 
   await page.getByRole('button', { name: 'Browse website', exact: true }).click();
-  await frame.getByRole('button', { name: 'Website clicks: 0', exact: true }).click();
+  const browsePoint = await websiteButtonPoint(page, iframe, frame.getByRole('button', { name: 'Website clicks: 0', exact: true }), 'iframe');
+  await page.mouse.click(browsePoint.x, browsePoint.y);
   await expect(frame.getByRole('button', { name: 'Website clicks: 1', exact: true })).toBeVisible();
 });
 
