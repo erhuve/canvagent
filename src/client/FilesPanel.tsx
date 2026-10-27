@@ -1,5 +1,6 @@
 import { forwardRef, lazy, Suspense, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { api, ApiError, apiPath, errorMessage } from "./api";
+import type { FileLocation } from "./fileLinks";
 import { Icon } from "./icons";
 import type { CodeEditorHandle } from "./CodeEditor";
 import { FileActionMenu, FileOperationDialog, type FileActionTarget, type FileInfo, type FileMenuState, type FileOperation } from "./FileActions";
@@ -12,6 +13,7 @@ type TextFile = { path: string; content: string; revision: string; size: number 
 type IndexedFile = { path: string; name: string };
 type SearchMatch = { path: string; line: number; column: number; text: string };
 type OpenFile = { path: string; kind: "text" | "image" | "binary"; content: string; saved: string; revision: string; error?: string; saving?: boolean };
+export type FileCommand = { id: number } & ({ kind: "open" | "find" | "search" | "palette" } | { kind: "file"; location: FileLocation });
 export type FilesPanelHandle = { prepareToLeave: () => Promise<boolean> };
 const fileName = (path: string) => path.split("/").at(-1) || path;
 const isDirty = (file: OpenFile) => file.kind === "text" && file.content !== file.saved;
@@ -21,7 +23,7 @@ const withinPath = (path: string, parent: string) => path === parent || path.sta
 const remapPath = (path: string, before: string, after: string) => withinPath(path, before) ? `${after}${path.slice(before.length)}` : path;
 type FileNotice = { message: string; trashId?: string; path?: string; openPaths?: string[]; expandedPaths?: string[]; activePath?: string; error?: string };
 
-export const FilesPanel = forwardRef<FilesPanelHandle, { active: boolean; projectName: string; projectKey: string; contextSessionId?: string; command?: { id: number; kind: "open" | "find" | "search" | "palette" }; onError: (message: string) => void; onNeedsAttention: () => void }>(function FilesPanel({ active, projectName, projectKey, contextSessionId, command, onError, onNeedsAttention }, ref) {
+export const FilesPanel = forwardRef<FilesPanelHandle, { active: boolean; projectName: string; projectKey: string; contextSessionId?: string; command?: FileCommand; onError: (message: string) => void; onNeedsAttention: () => void }>(function FilesPanel({ active, projectName, projectKey, contextSessionId, command, onError, onNeedsAttention }, ref) {
   const [directories, setDirectories] = useState<Record<string, Directory>>({});
   const [expanded, setExpanded] = useState(new Set<string>([""]));
   const [files, setFiles] = useState<OpenFile[]>([]);
@@ -176,7 +178,8 @@ export const FilesPanel = forwardRef<FilesPanelHandle, { active: boolean; projec
   };
   useEffect(() => {
     if (!command) return;
-    if (command.kind === "open") beginQuickOpen();
+    if (command.kind === "file") void openFile(command.location.path, command.location.line, command.location.column);
+    else if (command.kind === "open") beginQuickOpen();
     else if (command.kind === "search") { setSearchMode(true); requestAnimationFrame(() => { searchInput.current?.focus(); searchInput.current?.select(); }); }
     else requestAnimationFrame(() => runEditorCommand(command.kind as "find" | "palette"));
   }, [command?.id]);

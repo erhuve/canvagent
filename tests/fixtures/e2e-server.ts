@@ -81,6 +81,13 @@ class BrowserFixtureRuntime {
         } });
         return;
       }
+      if (text.includes('[file-links]')) {
+        const cwd = this.options.cwd;
+        this.options.onEvent({ type: 'item/agentMessage/delta', payload: { threadId: this.threadId, turnId, itemId: `links-${turnId}`, delta:
+          `[Relative draft](notes/draft.txt) · [Absolute readme](${cwd}/README.md) · [Source line](src/example.ts#L1C7) · [File URL](file://${cwd}/README.md) · [Website](https://example.com) · [Missing file](missing.md)` } });
+        this.complete();
+        return;
+      }
       if (text.includes('[chat]')) {
         const itemId = `chat-${turnId}`;
         this.options.onEvent({ type: 'item/agentMessage/delta', payload: { threadId: this.threadId, turnId, itemId, delta: 'A **streamed** reply' } });

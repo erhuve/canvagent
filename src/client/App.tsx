@@ -406,6 +406,7 @@ export default function App() {
       onChangeSettings={changeSettings} onSaveDefaultSettings={saveDefaultSettings} settingsSaving={settingsSaving}
       onError={notify} onDismissNotice={() => { if (session) setNotices(previous => ({ ...previous, [session.id]: { id: previous[session.id]?.id ?? "", text: "" } })); }}
       onOpenWorkspace={() => void openProject()}
+      onOpenFile={location => panel.current?.openFile(location)}
       sessionContent={<>
         {session?.pendingApprovals.map(approval => <ApprovalCard key={approval.id} approval={approval} sessionId={session.id} onError={notify} />)}
         {session?.error && <div className="inline-error" role="alert"><Icon name="warning" size={16} /><span>{session.error}</span></div>}

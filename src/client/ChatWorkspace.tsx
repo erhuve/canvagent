@@ -12,6 +12,9 @@ import {
   type AssistantRuntime,
   type ThreadMessageLike,
 } from "@assistant-ui/react";
+import { defaultUrlTransform } from "react-markdown";
+import { MessageLink, MessageLinkContext } from "./MessageLink";
+import { resolveFileLink, type FileLocation } from "./fileLinks";
 import { MarkdownTextPrimitive } from "@assistant-ui/react-markdown";
 import { defaultAgentSettings, type AgentSettings } from "../shared/settings";
 import type { ContextAttachment } from "../shared/context";
@@ -60,9 +63,15 @@ export function toChatMessage(message: Message): ThreadMessageLike {
 }
 
 function Markdown() {
-  return <MarkdownTextPrimitive className="message-content" smooth={false} components={{
-    a: ({ children, ...props }) => <a {...props} target="_blank" rel="noreferrer">{children}</a>,
-  }} />;
+  const { workspace } = useContext(MessageLinkContext);
+  return <MarkdownTextPrimitive className="message-content" smooth={false}
+    urlTransform={(url, key) => {
+      const file = key === "href" ? resolveFileLink(url, workspace) : undefined;
+      if (!file) return defaultUrlTransform(url);
+      const path = file.path.split('/').map(encodeURIComponent).join('/');
+      return `${path}${file.line ? `#L${file.line}${file.column ? `C${file.column}` : ''}` : ''}`;
+    }}
+    components={{ a: ({ node, ...props }) => <MessageLink {...props} /> }} />;
 }
 
 function ChatMessage() {
@@ -122,6 +131,7 @@ type WorkspaceProps = {
   onError: (message: string) => void;
   onDismissNotice: () => void;
   onOpenWorkspace: () => void;
+  onOpenFile: (location: FileLocation) => void;
   projects: ProjectSummary[];
   notifications: NotificationsController;
   onActivateProject: (id: string, sessionId?: string) => Promise<void>;
@@ -340,7 +350,7 @@ export function ChatWorkspace(props: WorkspaceProps) {
     setSidebarOpen(false);
   };
 
-  return <AgentNameContext.Provider value={agentName}><MessageAttachmentsContext.Provider value={messageAttachments}><AssistantRuntimeProvider runtime={runtime}>
+  return <MessageLinkContext.Provider value={{ workspace: state?.project.workspace, openFile: location => { setMobilePane("canvas"); props.onOpenFile(location); }, onError: props.onError }}><AgentNameContext.Provider value={agentName}><MessageAttachmentsContext.Provider value={messageAttachments}><AssistantRuntimeProvider runtime={runtime}>
     <div ref={paneLayout.shellRef} style={paneLayout.style} className={`app-shell ${sidebarOpen ? "sidebar-open" : ""} ${paneLayout.resizing ? "layout-resize-active" : ""}`}>
       {paneLayout.resizing && <div className="layout-resize-shield" aria-hidden="true" />}
       {sidebarOpen && <button className="sidebar-scrim" aria-label="Close conversation history" onClick={() => setSidebarOpen(false)} />}
@@ -401,5 +411,5 @@ export function ChatWorkspace(props: WorkspaceProps) {
         </main>
       </div>
     </div>
-  </AssistantRuntimeProvider></MessageAttachmentsContext.Provider></AgentNameContext.Provider>;
+  </AssistantRuntimeProvider></MessageAttachmentsContext.Provider></AgentNameContext.Provider></MessageLinkContext.Provider>;
 }

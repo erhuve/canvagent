@@ -8,11 +8,11 @@ export type FileMenuState = { target?: FileActionTarget; x: number; y: number; o
 export type FileOperation = { kind: "create-file" | "create-directory" | "rename" | "delete"; target?: FileActionTarget; parent: string };
 export type FileInfo = { path: string; name: string; kind: "file" | "directory"; revision: string; size: number; entries: number };
 
-export function FileActionMenu({ menu, onClose, onAction, onCopy }: {
-  menu: FileMenuState;
+export function FileContextMenu({ menu, label, onClose, children }: {
+  menu: Pick<FileMenuState, "x" | "y" | "origin">;
+  label: string;
   onClose(restoreFocus?: boolean): void;
-  onAction(kind: FileOperation["kind"], target?: FileActionTarget): void;
-  onCopy(target: FileActionTarget): void;
+  children: ReactNode;
 }) {
   const element = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
@@ -30,9 +30,7 @@ export function FileActionMenu({ menu, onClose, onAction, onCopy }: {
     window.addEventListener("resize", resize);
     return () => { document.removeEventListener("pointerdown", dismiss); window.removeEventListener("resize", resize); };
   }, [onClose]);
-  const choose = (kind: FileOperation["kind"]) => { onClose(false); onAction(kind, menu.target); };
-  const item = (label: string, icon: string, action: () => void, danger = false): ReactNode => <button type="button" role="menuitem" className={danger ? "file-action-danger" : undefined} onClick={action}><Icon name={icon} size={14} /><span>{label}</span></button>;
-  return createPortal(<div ref={element} className="file-actions-menu" role="menu" aria-label={menu.target ? `File actions: ${menu.target.path}` : "Project file actions"} style={{ left: menu.x, top: menu.y }} onContextMenu={event => event.preventDefault()} onKeyDown={event => {
+  return createPortal(<div ref={element} className="file-actions-menu" role="menu" aria-label={label} style={{ left: menu.x, top: menu.y }} onContextMenu={event => event.preventDefault()} onKeyDown={event => {
     const buttons = [...(element.current?.querySelectorAll<HTMLButtonElement>('button[role="menuitem"]') ?? [])];
     const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
     if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
@@ -41,10 +39,23 @@ export function FileActionMenu({ menu, onClose, onAction, onCopy }: {
       buttons[next]?.focus();
     } else if (event.key === "Escape" || event.key === "Tab") { event.preventDefault(); event.stopPropagation(); onClose(true); }
   }}>
+    {children}
+  </div>, document.body);
+}
+
+export function FileActionMenu({ menu, onClose, onAction, onCopy }: {
+  menu: FileMenuState;
+  onClose(restoreFocus?: boolean): void;
+  onAction(kind: FileOperation["kind"], target?: FileActionTarget): void;
+  onCopy(target: FileActionTarget): void;
+}) {
+  const choose = (kind: FileOperation["kind"]) => { onClose(false); onAction(kind, menu.target); };
+  const item = (label: string, icon: string, action: () => void, danger = false): ReactNode => <button type="button" role="menuitem" className={danger ? "file-action-danger" : undefined} onClick={action}><Icon name={icon} size={14} /><span>{label}</span></button>;
+  return <FileContextMenu menu={menu} label={menu.target ? `File actions: ${menu.target.path}` : "Project file actions"} onClose={onClose}>
     {item("New file…", "file", () => choose("create-file"))}
     {item("New folder…", "folder", () => choose("create-directory"))}
     {menu.target && <><div role="separator" />{item("Rename…", "compose", () => choose("rename"))}{item("Copy relative path", "copy", () => { onClose(true); onCopy(menu.target!); })}<div role="separator" />{item("Delete…", "close", () => choose("delete"), true)}</>}
-  </div>, document.body);
+  </FileContextMenu>;
 }
 
 export function FileOperationDialog({ operation, name, info, dirtyPaths, busy, loading, error, notice, onName, onCancel, onSubmit, onRefresh }: {

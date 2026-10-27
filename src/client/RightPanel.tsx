@@ -1,23 +1,30 @@
 import { forwardRef, lazy, Suspense, useEffect, useImperativeHandle, useRef, useState, type ReactNode } from "react";
-import { FilesPanel, type FilesPanelHandle } from "./FilesPanel";
+import { FilesPanel, type FilesPanelHandle, type FileCommand } from "./FilesPanel";
+import type { FileLocation } from "./fileLinks";
 import { BrowserPanel } from "./BrowserPanel";
 import { GitPanel } from "./GitPanel";
 import { Icon } from "./icons";
 
 const TerminalPanel = lazy(() => import('./TerminalPanel').then(module => ({ default: module.TerminalPanel })));
 
-export type RightPanelHandle = FilesPanelHandle;
+export type RightPanelHandle = FilesPanelHandle & { openFile(location: FileLocation): void };
 export const RightPanel = forwardRef<RightPanelHandle, { children: ReactNode; projectName: string; projectKey: string; contextSessionId?: string; onError: (message: string) => void }>(function RightPanel({ children, projectName, projectKey, contextSessionId, onError }, ref) {
   const [tab, setTab] = useState<"canvas" | "browser" | "files" | "changes">("canvas");
   const [filesVisited, setFilesVisited] = useState(false);
   const [changesVisited, setChangesVisited] = useState(false);
-  const [fileCommand, setFileCommand] = useState<{ id: number; kind: "open" | "find" | "search" | "palette" }>();
+  const [fileCommand, setFileCommand] = useState<FileCommand>();
   const [terminalOpen, setTerminalOpen] = useState(() => { try { return sessionStorage.getItem(`canvagent:terminal-open:${projectKey}`) === 'true'; } catch { return false; } });
   const [terminalVisited, setTerminalVisited] = useState(terminalOpen);
   const [terminalHeight, setTerminalHeight] = useState(() => { try { const saved = Number(localStorage.getItem(`canvagent:terminal-height:${projectKey}`)); return saved >= 140 ? Math.min(saved, 600) : 260; } catch { return 260; } });
   const files = useRef<FilesPanelHandle>(null);
   useEffect(() => { try { sessionStorage.setItem(`canvagent:terminal-open:${projectKey}`, String(terminalOpen)); } catch { /* Optional preference. */ } }, [terminalOpen, projectKey]);
-  useImperativeHandle(ref, () => ({ prepareToLeave: async () => files.current?.prepareToLeave() ?? true }));
+  useImperativeHandle(ref, () => ({
+    prepareToLeave: async () => files.current?.prepareToLeave() ?? true,
+    openFile: location => {
+      setFilesVisited(true); setTab("files");
+      setFileCommand(previous => ({ id: (previous?.id ?? 0) + 1, kind: "file", location }));
+    },
+  }));
   useEffect(() => {
     const command = (kind: "open" | "find" | "search" | "palette") => {
       setFilesVisited(true); setTab("files");
